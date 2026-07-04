@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UNDERCANOPY — the overgrown city</title>
+<style>
+  :root{
+    --green:#9be27a;
+    --dim:#c9d6bd;
+  }
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  html,body{ width:100%; height:100%; overflow:hidden; background:#060a05; }
+  body{ font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif; color:var(--dim); }
+  canvas#game{ display:block; width:100%; height:100%; }
+
+  /* ---------- overlays ---------- */
+  #vignette{
+    position:fixed; inset:0; pointer-events:none; opacity:0; z-index:20;
+    background:radial-gradient(ellipse at center, rgba(255,60,10,0) 42%, rgba(210,40,0,.55) 100%);
+    transition:opacity .3s;
+  }
+  #fade{
+    position:fixed; inset:0; background:#000; pointer-events:none; opacity:0; z-index:40;
+    transition:opacity .8s;
+  }
+
+  /* ---------- intro / pause ---------- */
+  #overlay{
+    position:fixed; inset:0; z-index:50; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    background:
+      radial-gradient(ellipse at 50% 120%, rgba(38,80,30,.55), rgba(0,0,0,0) 60%),
+      linear-gradient(180deg, rgba(3,8,4,.92), rgba(4,12,5,.96));
+    backdrop-filter: blur(3px);
+  }
+  #overlay .card{ max-width:640px; padding:36px 44px; text-align:center; }
+  #overlay h1{
+    font-family: Palatino, Georgia, serif; font-weight:600; letter-spacing:.35em;
+    font-size:clamp(28px,5vw,52px); color:#dff0c8; text-shadow:0 0 32px rgba(120,220,90,.35);
+    margin-bottom:6px;
+  }
+  #overlay h2{ font-size:12px; letter-spacing:.5em; color:#7ca568; font-weight:400; margin-bottom:26px; }
+  #overlay p.story{
+    font-family: Palatino, Georgia, serif; font-style:italic; font-size:15.5px; line-height:1.65;
+    color:#b9cba6; margin-bottom:24px;
+  }
+  #overlay .objective{
+    font-size:13px; color:#e8d98a; margin-bottom:26px; letter-spacing:.05em;
+  }
+  #overlay .controls{
+    display:grid; grid-template-columns:auto auto; gap:5px 18px; justify-content:center;
+    font-size:12.5px; color:#8fa383; margin-bottom:30px; text-align:left;
+  }
+  #overlay .controls b{ color:#cfe3b8; font-weight:600; min-width:120px; display:inline-block; }
+  #overlay .go{
+    font-size:14px; letter-spacing:.4em; color:var(--green);
+    animation:pulse 2.2s ease-in-out infinite;
+  }
+  @keyframes pulse{ 0%,100%{opacity:.45} 50%{opacity:1} }
+  #overlay .tiny{ margin-top:22px; font-size:11px; color:#5a6b50; }
+
+  /* ---------- HUD ---------- */
+  #hud{ position:fixed; inset:0; pointer-events:none; z-index:10; display:none; }
+  #crosshair{
+    position:absolute; left:50%; top:50%; width:5px; height:5px; margin:-2.5px;
+    background:rgba(255,255,255,.75); border-radius:50%;
+    box-shadow:0 0 4px rgba(0,0,0,.8);
+  }
+  .panel{
+    background:rgba(6,12,6,.55); border:1px solid rgba(150,200,120,.18);
+    border-radius:8px; backdrop-filter: blur(2px);
+  }
+  #topleft{
+    position:absolute; top:14px; left:14px; padding:10px 14px; font-size:12.5px; line-height:1.8;
+    min-width:190px;
+  }
+  #clock{ font-size:17px; color:#e6f2d5; letter-spacing:.12em; }
+  #district{ color:#9fbe86; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; }
+  #envline{ color:#b9c8aa; }
+  #envline .exposed{ color:#ffb45e; }
+  #tempbar{ width:100%; height:7px; background:rgba(255,255,255,.09); border-radius:4px; margin-top:4px; overflow:hidden; }
+  #tempfill{
+    height:100%; width:0%; border-radius:4px;
+    background:linear-gradient(90deg,#7fd0ff,#ffe27a 55%,#ff5a2a);
+    transition:width .25s linear;
+  }
+  #heatlabel{ font-size:10.5px; color:#889a7a; letter-spacing:.1em; }
+
+  #minimapWrap{ position:absolute; top:14px; right:14px; padding:8px; }
+  #minimap{ display:block; border-radius:50%; }
+  #mmlabel{ text-align:center; font-size:10px; letter-spacing:.25em; color:#7e9a6c; margin-top:6px; }
+
+  #hint{
+    position:absolute; bottom:52px; left:50%; transform:translateX(-50%);
+    font-size:13px; color:#e4f0d2; text-shadow:0 1px 4px #000; letter-spacing:.03em;
+    background:rgba(8,14,7,.5); padding:6px 16px; border-radius:20px;
+    opacity:0; transition:opacity .4s; white-space:nowrap;
+  }
+  #msgs{
+    position:absolute; bottom:110px; left:50%; transform:translateX(-50%);
+    display:flex; flex-direction:column; align-items:center; gap:8px; width:80%;
+  }
+  .msg{
+    font-family:Palatino, Georgia, serif; font-style:italic; font-size:15px; text-align:center;
+    color:#eef6da; text-shadow:0 1px 6px #000; background:rgba(6,12,6,.55);
+    padding:8px 22px; border-radius:8px; border:1px solid rgba(170,220,130,.15);
+    animation:msgin .5s ease-out; max-width:640px;
+  }
+  .msg.gold{ color:#ffe9a8; border-color:rgba(255,220,130,.3); }
+  @keyframes msgin{ from{opacity:0; transform:translateY(10px)} to{opacity:1; transform:none} }
+  #fps{ position:absolute; bottom:10px; right:14px; font-size:10px; color:#5f7053; }
+  #status{ position:absolute; left:-9999px; top:0; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div id="crosshair"></div>
+  <div id="topleft" class="panel">
+    <div id="clock">06:00</div>
+    <div id="district">—</div>
+    <div id="envline">air <span id="airtemp">31</span>°C · alt <span id="alt">0</span>m · <span id="cover">shaded</span></div>
+    <div id="heatlabel">BODY HEAT</div>
+    <div id="tempbar"><div id="tempfill"></div></div>
+  </div>
+  <div id="minimapWrap" class="panel">
+    <canvas id="minimap" width="200" height="200"></canvas>
+    <div id="mmlabel">✦ THE SPIRE</div>
+  </div>
+  <div id="msgs"></div>
+  <div id="hint"></div>
+  <div id="fps"></div>
+</div>
+
+<div id="vignette"></div>
+<div id="fade"></div>
+
+<div id="overlay">
+  <div class="card">
+    <h1>UNDERCANOPY</h1>
+    <h2>THE OVERGROWN CITY · 2087</h2>
+    <p class="story">
+      The Warming didn't end the world — it moved it into the shade. When the engineered
+      megaflora came, they swallowed the cities whole. Now the old streets are cool green
+      tunnels, and what's left of us lives beneath the leaves. Above the canopy the sun
+      still burns at 54&nbsp;°C. You can climb out any time you like.<br>You just can't stay.
+    </p>
+    <div class="objective">✦&nbsp; Follow the marker to the old broadcast Spire and climb above the leaves — briefly.</div>
+    <div class="controls">
+      <div><b>Mouse</b> look</div><div><b>W A S D</b> move</div>
+      <div><b>Shift</b> run</div><div><b>Space</b> jump</div>
+      <div><b>W into vines</b> climb (look up/down)</div><div><b>T</b> hold to pass time</div>
+      <div><b>M</b> sound on/off</div><div><b>R</b> return to shade</div>
+    </div>
+    <div class="go" id="goLabel">CLICK TO WAKE</div>
+    <div class="tiny">runs locally · procedural &amp; endless · headphones recommended</div>
+  </div>
+</div>
+
+<div id="status"></div>
+<script src="three.min.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

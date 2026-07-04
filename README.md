@@ -1,0 +1,62 @@
+# UNDERCANOPY — the overgrown city
+
+A first-person exploration game in a single HTML file + one script, built on **three.js** (r152).
+
+**2087.** The Warming moved civilization into the shade. Engineered megaflora swallowed the
+cities, and now people live in the cool green street-canyons beneath the leaves. Above the
+canopy the sun burns at 54 °C — you can climb out any time you like, you just can't stay.
+
+## Run it
+
+Just open `index.html` in a browser (double-click works — everything is local and procedural,
+no network needed). Chrome/Edge/Safari, a laptop from the last few years is plenty.
+
+If your browser is strict about `file://` pages:
+
+```sh
+cd undercanopy
+python3 -m http.server 8080   # then open http://localhost:8080
+```
+
+## Controls
+
+| Input | Action |
+|---|---|
+| Click | capture the mouse / resume |
+| Mouse | look |
+| W A S D | move |
+| Shift | sprint |
+| Space | jump (or kick off a wall while climbing) |
+| **W while facing vines** | climb — look up to ascend, down to descend |
+| T (hold) | fast-forward time |
+| M | sound on/off |
+| R | return to your last shaded spot |
+| Esc | pause |
+
+## What's in the world
+
+- **Infinite procedural city** — deterministic chunks: row-house blocks, tower districts,
+  parks, ruined plazas, groves. Streets with faded lane markings, sidewalks, abandoned
+  overgrown cars, street lamps (some still work), power poles with sagging wires, market
+  stalls, rooftop water tanks and gardens.
+- **The people** — cloaked citizens stroll the sidewalks, chat in pairs, sweep, tend the
+  moss, kids run loops, and lantern-carriers wander after dark. They'll nod as you pass.
+- **Climbing** — vine-covered facades and giant trunks are climbable. Mantle onto rooftops,
+  or walk the springy roof of the forest itself.
+- **Heat** — a day/night cycle drives temperature. Under the leaves you're safe; above the
+  canopy (or in open plazas at noon) your body heat climbs. Overheat and you wake up back
+  in the shade.
+- **The Spire** — follow the ✦ marker on the minimap to the old broadcast tower and climb
+  above the canopy for the reveal.
+- **Day & night** — dawn glow, blazing noon, fireflies, bioluminescent glow-moss, lit
+  windows, stars, drifting clouds. All audio (wind, birds, crickets, footsteps) is
+  synthesized live with WebAudio.
+
+## Tech notes
+
+- three.js r152 (UMD build, vendored as `three.min.js`); everything else is `game.js`.
+- All textures are generated on canvas at boot; all geometry is procedural and batched
+  per chunk (~6 draw calls per chunk) with vertex colors.
+- Headless smoke test / screenshots:
+  `chrome --headless=new --enable-unsafe-swiftshader --virtual-time-budget=6000 --screenshot "index.html?shot=1"`
+  (`shot=1` street, `shot=2` above the canopy, `shot=3` night).
