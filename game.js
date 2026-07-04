@@ -350,6 +350,8 @@ const matLamp = new THREE.MeshStandardMaterial({
   vertexColors: true, emissive: srgb(0xffd9a0), emissiveIntensity: 0, roughness: 0.6, metalness: 0
 });
 const leafDepth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: texLeaf, alphaTest: 0.45 });
+// Still, dark reservoir water — one extra plane mesh per reservoir chunk (Anomalies).
+const matWater = new THREE.MeshStandardMaterial({ color: srgb(0x123a34), transparent: true, opacity: 0.78, roughness: 0.18, metalness: 0.15, side: THREE.DoubleSide, depthWrite: false });
 
 /* ------------------------------------------------------- geometry batching -- */
 class Batch {
@@ -413,6 +415,7 @@ const tplRoot = new THREE.CylinderGeometry(0.35, 1, 1, 6, 1, true); tplRoot.tran
 const tplBlob = new THREE.IcosahedronGeometry(1, 1);
 const tplRock = new THREE.IcosahedronGeometry(1, 0);
 const tplBox = new THREE.BoxGeometry(1, 1, 1); tplBox.translate(0, 0.5, 0);
+const tplBoxC = new THREE.BoxGeometry(1, 1, 1);   // centered (for tilted slabs / decks)
 const tplCyl = new THREE.CylinderGeometry(1, 1, 1, 8); tplCyl.translate(0, 0.5, 0);
 const tplWheel = new THREE.CylinderGeometry(1, 1, 1, 8); tplWheel.rotateX(Math.PI / 2);
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _pv = new THREE.Vector3(), _e = new THREE.Euler();
@@ -449,6 +452,17 @@ const COL = {
 const CAR_COLS = [0x7a6f63, 0x5c6e7a, 0x6e5a50, 0x4a5a4a, 0x8a8578, 0x6b4a3f, 0x51586b, 0x746a4a].map(srgb);
 const SIGN_COLS = [0x7a3b32, 0x35526b, 0x8a6b2f, 0x4e6242, 0x6b4a6e, 0x2f5a55].map(srgb);
 
+// Height-graded foliage tint (Phase 3): the same base leaf colour reads deeper/darker
+// green down in the shaded lower canopy and sun-bleached (brighter, a touch yellower)
+// up in the crowns — so the strata separate when you look straight up from the street.
+// Cheap: a per-blob vertex-colour lerp picked at emission time by the blob's world y.
+// Returns a fresh Color (safe to hand to addGeo, which reads r/g/b).
+function leafTintByY(base, y) {
+  const t = smooth(8, 38, y);                               // 0 street canopy · 1 emergent crowns
+  return _c.copy(base).multiplyScalar(0.80 + 0.42 * t)      // darker low → brighter high
+    .lerp(COL.leafDry, t * 0.14).clone();                  // faint sun-bleach up top
+}
+
 /* ----------------------------------------------------------- city naming -- */
 const NAME_A = ['Moss', 'Fern', 'Ivy', 'Bramble', 'Kudzu', 'Willow', 'Cedar', 'Banyan', 'Lichen', 'Sorrel', 'Alder', 'Rowan', 'Verdan', 'Hollow', 'Arbor', 'Tendril'];
 const NAME_B = [' Row', ' Gate', ' Yards', ' Hollow', ' Cross', ' Terrace', ' Quarter', ' Reach', ' Steps', ' Court', 'field', ' Rise'];
@@ -462,6 +476,13 @@ function districtName(ix, iz) {
 /* ======================================================================== */
 function chunkType(ix, iz) {
   if (ix === SPIRE.cx && iz === SPIRE.cz) return 'spire';
+  // Anomalies — rare landmark chunk types decided on their own salt so they override the
+  // common types (never the spire) at fixed rates while leaving city/park/etc. dominant.
+  const rr = hash2(ix, iz, 5150) / 4294967296;
+  if (rr < 0.025) return 'colossus';        // ~1/40
+  if (rr < 0.065) return 'fallen';          // ~1/25
+  if (rr < 0.105) return 'sinkhole';        // ~1/25
+  if (rr < 0.145) return 'reservoir';       // ~1/25
   const r = hash2(ix, iz, 1) / 4294967296;
   if (r < 0.55) return 'city';
   if (r < 0.67) return 'park';
@@ -494,17 +515,278 @@ function addTree(B, colData, mini, rng, x, z, h, R, opts) {
     const by = cy + (rng() - 0.4) * R * 0.4;
     const br = R * (0.42 + rng() * 0.33);
     const leafCol = [COL.leafA, COL.leafB, COL.leafC, COL.leafA][(rng() * 4) | 0];
-    B.leaf.addGeo(tplBlob, compose(bx, by, bz, br, br * 0.72, br, 0, rng() * 7, 0), leafCol, 0.22, rng);
+    B.leaf.addGeo(tplBlob, compose(bx, by, bz, br, br * 0.72, br, 0, rng() * 7, 0), leafTintByY(leafCol, by), 0.22, rng);
     padTop = Math.max(padTop, by + br * 0.5);
   }
   // low hanging blob for silhouettes
   if (rng() < 0.5) {
-    const br = R * 0.36, a = rng() * 7;
-    B.leaf.addGeo(tplBlob, compose(x + Math.cos(a) * R * 0.5, cy - R * 0.55, z + Math.sin(a) * R * 0.5, br, br * 0.6, br, 0, rng() * 7, 0), COL.leafC, 0.2, rng);
+    const br = R * 0.36, a = rng() * 7, ly = cy - R * 0.55;
+    B.leaf.addGeo(tplBlob, compose(x + Math.cos(a) * R * 0.5, ly, z + Math.sin(a) * R * 0.5, br, br * 0.6, br, 0, rng() * 7, 0), leafTintByY(COL.leafC, ly), 0.2, rng);
   }
   colData.trunks.push({ x, z, r: tr, h });
   colData.pads.push({ x, z, r: R * 0.8, y: padTop - R * 0.18 });
   mini.trees.push([x, z, R, 0]);
+  // Crown Nest on grove giants — reached by climbing the full-height trunk (h)
+  if ((opts.trunkR || 0) >= 1.9 && h >= 32 && rng() < 0.75)
+    addCrownNest(B, colData, rng, x, h, z, 2.5 + rng() * 1.4);
+}
+
+/* ---- multi-layered canopy (Phase 1): walkable limbs + weave lattice --------
+   All batched through the existing `plain`/`leaf` batches, deterministic per
+   chunk, and integrated into colData.pads so the existing support check
+   (feet within pad.y-1.3 .. +0.6) carries the player along a limb / platter. */
+const _up = new THREE.Vector3(0, 1, 0), _dir = new THREE.Vector3(), _qq = new THREE.Quaternion(), _limbM = new THREE.Matrix4();
+// Map the unit cylinder (tplCyl: y 0..1, r 1) onto the segment a→b at radius r.
+function segMat(ax, ay, az, bx, by, bz, r) {
+  _dir.set(bx - ax, by - ay, bz - az);
+  const L = _dir.length() || 1e-4;
+  _dir.multiplyScalar(1 / L);
+  _qq.setFromUnitVectors(_up, _dir);
+  _pv.set(ax, ay, az); _s.set(r, L, r);
+  return _limbM.compose(_pv, _qq, _s);
+}
+// A gently curved walkable limb of 3–6 chained cylinder segments, bark below with
+// a mossy top strip. Registers a run of small `pads` (r ≈ limb r + 0.3) along the
+// top so walking is smooth but the sides are narrow enough to fall off.
+function addLimb(B, colData, rng, x0, y0, z0, x1, y1, z1, r, opts) {
+  opts = opts || {};
+  const segs = opts.segs || (3 + (rng() * 4 | 0));                 // 3..6
+  const sag = opts.sag !== undefined ? opts.sag : (0.5 + rng() * 1.3);
+  const wob = (rng() - 0.5) * 0.5;                                 // tiny lateral weave
+  const bark = _c.copy(COL.bark).multiplyScalar(0.82 + rng() * 0.3).clone();
+  const moss = _c.copy(COL.moss).multiplyScalar(0.8 + rng() * 0.4).clone();
+  // sample the curve (gentle sag + slight wobble → the per-segment rotation)
+  const pts = [];
+  for (let k = 0; k <= segs; k++) {
+    const t = k / segs;
+    const px = lerp(x0, x1, t), pz = lerp(z0, z1, t);
+    const py = lerp(y0, y1, t) - Math.sin(t * Math.PI) * sag + Math.sin(t * Math.PI * 2) * wob;
+    pts.push([px, py, pz]);
+  }
+  for (let k = 0; k < segs; k++) {
+    const a = pts[k], b = pts[k + 1], rr = r * (1 - 0.12 * (k / segs));
+    B.plain.addGeo(tplCyl, segMat(a[0], a[1], a[2], b[0], b[1], b[2], rr), bark, 0.16, rng);
+    // mossy top strip (two-tone vertex colour via quad), normal facing up
+    let hx = b[0] - a[0], hz = b[2] - a[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
+    const px2 = -hz, pz2 = hx, hw = rr * 0.9;
+    B.plain.quad(
+      [a[0] - px2 * hw, a[1] + rr, a[2] - pz2 * hw],
+      [a[0] + px2 * hw, a[1] + rr, a[2] + pz2 * hw],
+      [b[0] + px2 * hw, b[1] + rr, b[2] + pz2 * hw],
+      [b[0] - px2 * hw, b[1] + rr, b[2] - pz2 * hw],
+      [0, 0, 1, 1], moss);
+  }
+  // epiphyte tufts (Phase 3): occasional tiny leaf blobs perched on the limb top —
+  // the mossy, overgrown Bough-Road underside look. Visual only (no collision).
+  if (opts.tufts) {
+    const nT = 1 + (rng() * 3 | 0);
+    for (let k = 0; k < nT; k++) {
+      const tt = 0.15 + rng() * 0.7, fp = tt * segs, si = Math.min(segs - 1, fp | 0), sf = fp - si;
+      const a = pts[si], b = pts[si + 1];
+      const ex = lerp(a[0], b[0], sf), ey = lerp(a[1], b[1], sf), ez = lerp(a[2], b[2], sf);
+      const er = 0.32 + rng() * 0.5;
+      const ecol = leafTintByY([COL.leafA, COL.leafC, COL.moss][(rng() * 3) | 0], ey);
+      B.leaf.addGeo(tplBlob, compose(ex + (rng() - 0.5) * r, ey + r * 0.6, ez + (rng() - 0.5) * r, er, er * 0.55, er, 0, rng() * 7, 0), ecol, 0.25, rng);
+    }
+  }
+  if (opts.noPads) return;
+  // walkable pads at ~1.3 m spacing along the limb top (overlapping so it's smooth)
+  const step = 1.3;
+  const layer = opts.layer || null;
+  const dropPad = (p) => colData.pads.push({ x: p[0], z: p[2], r: r + 0.3, y: p[1] + r, layer });
+  dropPad(pts[0]);
+  let dist = 0, nextAt = step;
+  for (let k = 0; k < segs; k++) {
+    const a = pts[k], b = pts[k + 1];
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) || 1e-4;
+    while (nextAt <= dist + L) {
+      const t = (nextAt - dist) / L;
+      dropPad([lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]);
+      nextAt += step;
+    }
+    dist += L;
+  }
+  dropPad(pts[segs]);
+}
+
+// L1 Bough Roads (~15–20 m): 2–4 walkable limb spans per chunk connecting street
+// trees to each other or to a nearby building rooftop (landing just above the roof).
+function addBoughRoads(B, colData, rng, ox, oz, type) {
+  const trees = [];
+  for (const t of colData.trunks) if (t.h >= 14 && t.r >= 0.7) trees.push(t);   // real trees only
+  if (trees.length === 0) return;
+  const roofs = [];
+  for (const s of colData.solids) if (s.h >= 8) roofs.push(s);                   // building tops
+  let nSpans = 2 + (rng() * 2 | 0);
+  if (type === 'park' || type === 'grove') nSpans = 3 + (rng() * 2 | 0);
+  else if (type === 'plaza') nSpans = 1 + (rng() * 2 | 0);
+  for (let s = 0; s < nSpans; s++) {
+    const src = trees[(rng() * trees.length) | 0];
+    let tgt = null, tgtY = 0, ex = 0, ez = 0, bd = 1e9;
+    const preferRoof = roofs.length && rng() < 0.5;
+    for (let k = 0; k < trees.length; k++) {                                     // tree ↔ tree
+      const o = trees[k]; if (o === src) continue;
+      const d = Math.hypot(o.x - src.x, o.z - src.z);
+      if (d < 10 || d > 40) continue;
+      if (d < bd) { bd = d; tgt = o; tgtY = clamp(o.h * 0.68, 14, 20); ex = o.x; ez = o.z; }
+    }
+    for (let k = 0; k < roofs.length; k++) {                                     // tree ↔ rooftop
+      const rf = roofs[k];
+      const rx = clamp(src.x, rf.x0, rf.x1), rz = clamp(src.z, rf.z0, rf.z1);    // nearest parapet point
+      const d = Math.hypot(rx - src.x, rz - src.z);
+      if (d < 8 || d > 40) continue;
+      if (d < bd || (preferRoof && tgt && d < bd * 1.4)) { bd = d; tgt = rf; tgtY = rf.h + 0.5; ex = rx; ez = rz; }
+    }
+    if (!tgt) continue;
+    const srcY = clamp(src.h * 0.68, 14, 20);                                    // attach at 60–75% trunk height
+    const dx = ex - src.x, dz = ez - src.z, dl = Math.hypot(dx, dz) || 1;
+    const sx = src.x + dx / dl * (src.r + 0.2), sz = src.z + dz / dl * (src.r + 0.2);
+    addLimb(B, colData, rng, sx, srcY, sz, ex, tgtY, ez, 0.5 + rng() * 0.3, { layer: 'bough', tufts: true });
+    // a vine dangling from the fork down to the street — a way up onto the bough road
+    if (rng() < 0.5) addVineRope(B, colData, rng, sx, sz, srcY, 0);
+  }
+}
+
+// L2 The Weave (~24–28 m): interlocking flattened leaf platters tying crowns
+// together, ~60–75% coverage with deliberate 4–8 m light-well gaps, none over
+// plaza, thinner over the street borders. Placement is decided on a GLOBAL cell
+// grid via hash2(gx,gz,…) so neighbouring chunks agree on the field; each chunk
+// only emits the cells whose centre lies inside it (owner emits whole geometry),
+// with large radii overhanging the borders for a seamless canopy.
+function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
+  if (type === 'plaza') return;                          // plazas keep open sky
+  if (type === 'colossus') return;                       // the colossus crown replaces the Weave
+  if (type === 'sinkhole') return;                       // open sky over the pit is dramatic
+  const N = 5, S = CHUNK / N;                            // 5×5 global cells, 12.8 m each
+  const norm = (h) => (h >>> 0) / 4294967296;
+  const placed = [];
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const gx = ix * N + i, gz = iz * N + j;
+    const h = hash2(gx, gz, 4242);
+    const edge = (i === 0 || j === 0 || i === N - 1 || j === N - 1);   // over the street borders
+    if (norm(h) > (edge ? 0.30 : 0.60)) continue;        // else: a light well — dappled, sky through
+    const h2 = hash2(gx, gz, 99), h3 = hash2(gz, gx, 77);
+    const jx = (((h >>> 8) & 255) / 255 - 0.5) * S * 0.5;
+    const jz = (((h >>> 16) & 255) / 255 - 0.5) * S * 0.5;
+    const cxp = ox + (i + 0.5) * S + jx, czp = oz + (j + 0.5) * S + jz;
+    const R = 4 + norm(h2) * 4;                           // r 4..8
+    const py = 24 + norm(h3) * 4;                         // y 24..28
+    const flat = 0.25 + ((h2 >>> 10) & 15) / 15 * 0.1;    // y-scale 0.25..0.35
+    const leafCol = [COL.leafA, COL.leafB, COL.leafC][(h2 >>> 5) % 3];
+    B.leaf.addGeo(tplBlob, compose(cxp, py, czp, R, R * flat, R, 0, ((h >>> 3) & 255) / 255 * 7, 0), leafTintByY(leafCol, py), 0.2, rng);
+    colData.pads.push({ x: cxp, z: czp, r: R * 0.82, y: py, layer: 'weave' });   // walkable platter
+    placed.push({ x: cxp, y: py, z: czp, R, flat });
+  }
+  // Hanging fringe (Phase 3): short vine ribbons dangling from each platter's underside
+  // rim — the "delicately intertwined" look seen from the street below. Visual only.
+  for (let k = 0; k < placed.length; k++) {
+    const pl = placed[k];
+    const nFr = 3 + (rng() * 4 | 0);                      // 3..6 ribbons per platter
+    const under = pl.y - pl.R * pl.flat * 0.7;            // just below the platter's flattened rim
+    for (let f = 0; f < nFr; f++) {
+      const a = rng() * Math.PI * 2, rr = pl.R * (0.5 + rng() * 0.38);
+      const fx = pl.x + Math.cos(a) * rr, fz = pl.z + Math.sin(a) * rr;
+      const len = rng() < 0.3 ? 2.8 + rng() * 1.4 : 0.5 + rng() * 2.0, w = 0.22 + rng() * 0.34;   // some hang to ~4 m (head height under platters)
+      const dx = Math.cos(a) * w / 2, dz = Math.sin(a) * w / 2;
+      const col = _c.copy(COL.vine).multiplyScalar(0.58 + rng() * 0.34).clone();
+      B.vine.quad([fx - dx, under - len, fz - dz], [fx + dx, under - len, fz + dz], [fx + dx, under, fz + dz], [fx - dx, under, fz - dz],
+        [0, 0, 1, Math.max(1, Math.round(len / 2))], col);
+    }
+  }
+  // thin lattice limbs weaving between nearby platters — visual intertwining, no pads
+  for (let k = 0; k < placed.length; k++) {
+    if (rng() < 0.55) continue;
+    let best = null, bd = 1e9;
+    for (let m = 0; m < placed.length; m++) {
+      if (m === k) continue;
+      const d = Math.hypot(placed[m].x - placed[k].x, placed[m].z - placed[k].z);
+      if (d > 6 && d < bd) { bd = d; best = placed[m]; }
+    }
+    if (best && bd < 18)
+      addLimb(B, colData, rng, placed[k].x, placed[k].y - 0.4, placed[k].z, best.x, best.y - 0.4, best.z, 0.18, { noPads: true, segs: 3, sag: 0.5 });
+  }
+  // Vine ropes: 2–4 climbable verticals hanging from platter undersides straight down
+  // to whatever rooftop lies beneath (else the ground). Placed at platter centres so a
+  // climber topping out lands cleanly on the platter's walkable pad.
+  let ropes = 0;
+  const maxRopes = 2 + (rng() * 3 | 0);                  // 2..4
+  for (let k = 0; k < placed.length && ropes < maxRopes; k++) {
+    if (rng() < 0.45) continue;
+    const pl = placed[k];
+    let yBot = 0;
+    for (const s of colData.solids) {                    // land on a roof under the platter, if any
+      if (s.h < 6 || s.h > pl.y - 2) continue;
+      if (pl.x > s.x0 && pl.x < s.x1 && pl.z > s.z0 && pl.z < s.z1) yBot = Math.max(yBot, s.h);
+    }
+    addVineRope(B, colData, rng, pl.x, pl.z, pl.y, yBot);
+    ropes++;
+  }
+}
+
+// A thin, climbable hanging vine: two crossed vine-textured ribbons + a `trunks`
+// entry (r ≈ 0.35, h = yTop) so the existing climb code carries the player up it.
+// yTop should sit at a walkable pad (a Weave platter or a limb) so the mantle-over
+// at the top drops the player onto solid footing.
+function addVineRope(B, colData, rng, x, z, yTop, yBot) {
+  if (yTop - yBot < 2) return;
+  const col = _c.copy(COL.vine).multiplyScalar(0.68 + rng() * 0.44).clone();
+  const w = 0.5, vRep = Math.max(1, Math.round((yTop - yBot) / 5));
+  const lean = (rng() - 0.5) * 0.7, bx = x + lean, bz = z + (rng() - 0.5) * 0.7;   // slight drift toward top
+  B.vine.quad([x - w / 2, yBot, z], [x + w / 2, yBot, z], [bx + w / 2, yTop, bz], [bx - w / 2, yTop, bz], [0, 0, 1, vRep], col);
+  B.vine.quad([x, yBot, z - w / 2], [x, yBot, z + w / 2], [bx, yTop, bz + w / 2], [bx, yTop, bz - w / 2], [0, 0, 1, vRep], col);
+  colData.trunks.push({ x, z, r: 0.35, h: yTop });
+}
+
+// Spiral limb: a walkable/climbable ramp that wraps a tower's corners as it rises from
+// roughly roof level up into the Weave band (24–28). 3–5 gently-sagging limb segments,
+// each stepping to the next corner one level up, offset just off the facade.
+function addSpiralLimb(B, colData, rng, cx, cz, w, d, h) {
+  const O = 0.7;                                          // stand-off from the wall
+  const corners = [
+    [cx - w / 2 - O, cz - d / 2 - O], [cx + w / 2 + O, cz - d / 2 - O],
+    [cx + w / 2 + O, cz + d / 2 + O], [cx - w / 2 - O, cz + d / 2 + O]
+  ];
+  const segs = 3 + (rng() * 3 | 0);                      // 3..5
+  const startY = clamp(h - 12, 11, 20);
+  const endY = clamp(h + 1, 25, 28);
+  const dy = (endY - startY) / segs;
+  let ci = (rng() * 4) | 0, prev = corners[ci], prevY = startY;
+  for (let k = 0; k < segs; k++) {
+    ci = (ci + 1) % 4;
+    const nxt = corners[ci], ny = prevY + dy;
+    addLimb(B, colData, rng, prev[0], prevY, prev[1], nxt[0], ny, nxt[1], 0.42, { segs: 2, sag: 0.3, layer: 'bough' });
+    prev = nxt; prevY = ny;
+  }
+}
+
+// L3 Crown Nest (y 32–40): a woven basket platform (walkable pad), a twig railing, 1–2
+// leaf umbrellas ~3 m overhead (real shadow → shade patch), some glow plants, and on
+// ~30% a lamp-material beacon blob. Sits atop a giant trunk or a tower roof.
+function addCrownNest(B, colData, rng, x, y, z, r) {
+  const basket = _c.copy(COL.wood).multiplyScalar(0.9 + rng() * 0.3).clone();
+  B.plain.addGeo(tplCyl, compose(x, y - 0.45, z, r, 0.55, r), basket, 0.14, rng);        // basket body
+  B.plain.addGeo(tplCyl, compose(x, y - 0.12, z, r, 0.18, r), _c.copy(COL.moss).multiplyScalar(0.9).clone(), 0.16, rng); // mossy rim
+  colData.pads.push({ x, z, r: r * 0.82, y, layer: 'nest' });
+  const posts = 8 + (rng() * 4 | 0);                                                       // twig railing
+  for (let k = 0; k < posts; k++) {
+    const a = k / posts * Math.PI * 2;
+    B.plain.addGeo(tplCyl, compose(x + Math.cos(a) * r * 0.92, y, z + Math.sin(a) * r * 0.92, 0.05, 0.65, 0.05, (rng() - 0.5) * 0.12, 0, (rng() - 0.5) * 0.12), COL.deadwood, 0.1, rng);
+  }
+  const nUmb = 1 + (rng() < 0.5 ? 1 : 0);                                                  // leaf umbrellas overhead
+  for (let k = 0; k < nUmb; k++) {
+    const ur = r * (0.7 + rng() * 0.45);
+    B.leaf.addGeo(tplBlob, compose(x + (rng() - 0.5) * r * 0.5, y + 2.8 + rng() * 0.8, z + (rng() - 0.5) * r * 0.5, ur, ur * 0.5, ur, 0, rng() * 7, 0),
+      [COL.leafA, COL.leafC][(rng() * 2) | 0], 0.2, rng);
+  }
+  if (rng() < 0.6) {                                                                       // glow garden
+    const n = 1 + (rng() * 2 | 0);
+    for (let k = 0; k < n; k++) {
+      const a = rng() * 7, d2 = rng() * r * 0.6, s = 0.22 + rng() * 0.25;
+      B.glow.addGeo(tplBlob, compose(x + Math.cos(a) * d2, y + s * 0.4, z + Math.sin(a) * d2, s, s * 0.7, s, 0, rng() * 7, 0), COL.glowPlant, 0.3, rng);
+    }
+  }
+  if (rng() < 0.3)                                                                         // beacon
+    B.lamp.addGeo(tplBlob, compose(x, y + 0.85, z, 0.4, 0.4, 0.4), srgb(0xffe0b0), 0, rng);
 }
 
 function addGrassTuft(B, rng, x, z, s) {
@@ -520,7 +802,7 @@ function addGrassTuft(B, rng, x, z, s) {
 
 function addWallVines(B, rng, x0, z0, x1, z1, h, side) {
   // side: 0:+x face 1:-x 2:+z 3:-z ; strips hang on that face
-  const n = 3 + (rng() * 5 | 0);
+  const n = 5 + (rng() * 7 | 0);
   for (let k = 0; k < n; k++) {
     const w = 1.8 + rng() * 2.4;
     const top = h * (0.55 + rng() * 0.45);
@@ -556,7 +838,7 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   opts = opts || {};
   const x0 = cx - w / 2, x1 = cx + w / 2, z0 = cz - d / 2, z1 = cz + d / 2;
   const tint = FACADE_TINTS[(rng() * FACADE_TINTS.length) | 0].clone().multiplyScalar(0.82 + rng() * 0.26);
-  const mossy = _c.copy(tint).lerp(COL.moss, 0.6).multiplyScalar(0.75).clone();
+  const mossy = _c.copy(tint).lerp(COL.moss, 0.74).multiplyScalar(0.66).clone();  // stronger ground-level moss creep
   // per-building window rhythm: bay width (~3 m) & storey height (~3.4 m) vary so facades differ
   const bay = 2.9 + rng() * 1.4, flr = 3.0 + rng() * 0.9;
   const uc = Math.max(1, Math.round(w / bay)), ucd = Math.max(1, Math.round(d / bay));
@@ -571,9 +853,9 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   const roofCol = _c.copy(COL.roof).multiplyScalar(0.85 + rng() * 0.3).clone();
   B.plain.quad([x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], [0, 0, 1, 1], roofCol);
   // vines on some faces
-  const hasVines = opts.vines !== undefined ? opts.vines : rng() < 0.78;
+  const hasVines = opts.vines !== undefined ? opts.vines : rng() < 0.92;
   if (hasVines) {
-    const sides = opts.allSides ? [0, 1, 2, 3] : [0, 1, 2, 3].filter(() => rng() < 0.7);
+    const sides = (opts.allSides || rng() < 0.4) ? [0, 1, 2, 3] : [0, 1, 2, 3].filter(() => rng() < 0.85);
     if (sides.length === 0) sides.push((rng() * 4) | 0);
     for (const s of sides) addWallVines(B, rng, x0, z0, x1, z1, h, s);
   }
@@ -620,21 +902,38 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
       B.leaf.addGeo(tplBlob, compose(gx, h + gr * 0.4, gz, gr, gr * 0.6, gr, 0, rng() * 7, 0), rng() < 0.4 ? COL.leafDry : COL.leafB, 0.2, rng);
     }
   }
+  // Spiral limb wrapping ~1 in 4 towers (a climb/walk route toward the Weave), and an
+  // occasional Crown Nest on a tall roof (L3, y 32–40).
+  // green roofline: on ~40% of buildings, small leaf blobs spill over the parapet corners
+  if (rng() < 0.4) {
+    const corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+    const nBlob = 1 + (rng() * 3 | 0);
+    for (let k = 0; k < nBlob; k++) {
+      const cn = corners[(rng() * 4) | 0];
+      const br = 0.7 + rng() * 1.3;
+      const bx = clamp(cn[0] + (cn[0] < cx ? 1 : -1) * br * 0.3, x0, x1);
+      const bz = clamp(cn[1] + (cn[1] < cz ? 1 : -1) * br * 0.3, z0, z1);
+      B.leaf.addGeo(tplBlob, compose(bx, h - br * 0.15, bz, br, br * 0.55, br, 0, rng() * 7, 0), leafTintByY(rng() < 0.35 ? COL.leafDry : COL.leafB, h), 0.22, rng);
+    }
+  }
+  if (h > 20 && rng() < 0.25) addSpiralLimb(B, colData, rng, cx, cz, w, d, h);
+  if (h >= 30 && h <= 46 && rng() < 0.3) addCrownNest(B, colData, rng, cx, cz, h, 2.5 + rng() * 1.3);
   colData.solids.push({ x0, z0, x1, z1, h, vine: hasVines });
   mini.rects.push([x0, z0, w, d, h]);
 }
 
 function addCurtain(B, rng, ax, ay, az, bx, by, bz) {
-  const segs = 7, sag = 2 + rng() * 3;
+  const segs = 7 + (rng() * 3 | 0), sag = 2 + rng() * 3.5;
+  const skip = 0.15 + rng() * 0.18;                    // density variance per curtain
   for (let k = 0; k <= segs; k++) {
     const t = k / segs;
     const px = lerp(ax, bx, t), pz = lerp(az, bz, t);
     const py = lerp(ay, by, t) - Math.sin(t * Math.PI) * sag;
-    if (rng() < 0.25) continue;
-    const len = 1.6 + rng() * 3.2, w = 1.1 + rng() * 0.9;
+    if (rng() < skip) continue;
+    const len = 1.4 + rng() * (rng() < 0.3 ? 5.5 : 3.4), w = 1.0 + rng() * 1.2;
     const a = rng() * Math.PI;
     const dx = Math.cos(a) * w / 2, dz = Math.sin(a) * w / 2;
-    const col = _c.copy(COL.vine).multiplyScalar(0.75 + rng() * 0.45).clone();
+    const col = _c.copy(COL.vine).multiplyScalar(0.7 + rng() * 0.5).clone();
     B.vine.quad([px - dx, py - len, pz - dz], [px + dx, py - len, pz + dz], [px + dx, py, pz + dz], [px - dx, py, pz - dz],
       [0, 0, 1, Math.max(1, Math.round(len / 5))], col);
   }
@@ -642,6 +941,19 @@ function addCurtain(B, rng, ax, ay, az, bx, by, bz) {
 
 function addGlowPlant(B, rng, x, z, s) {
   B.glow.addGeo(tplBlob, compose(x, s * 0.4, z, s, s * 0.7, s, 0, rng() * 7, 0), COL.glowPlant, 0.3, rng);
+}
+
+// Flat root/ivy creep patch on the ground (visual only): an irregular dark-green leaf
+// quad laid just above the pavement. Cheap — one textured quad per patch.
+function addIvyPatch(B, rng, x, z, s) {
+  const y = 0.06 + rng() * 0.04;
+  const a = rng() * Math.PI, ca = Math.cos(a) * s, sa = Math.sin(a) * s;
+  const j = () => (rng() - 0.5) * s * 0.4;
+  const col = _c.copy(COL.leafC).multiplyScalar(0.55 + rng() * 0.3).clone();
+  B.leaf.quad(
+    [x - ca + j(), y, z - sa + j()], [x + sa + j(), y, z - ca + j()],
+    [x + ca + j(), y, z + sa + j()], [x - sa + j(), y, z + ca + j()],
+    [0, 0, 1, 1], col);
 }
 
 /* ---- streets: asphalt, markings, sidewalks ---- */
@@ -698,6 +1010,16 @@ function addCar(B, colData, rng, x, z, ang) {
     const mr = 0.5 + rng() * 0.5;
     B.leaf.addGeo(tplBlob, compose(mx, 0.75, mz, mr, mr * 0.5, mr, 0, rng() * 7, 0), COL.leafC, 0.2, rng);
   }
+  if (rng() < 0.55) { // a vine drape or two spilling over the roof/hood
+    const nd = 1 + (rng() < 0.4 ? 1 : 0);
+    for (let k = 0; k < nd; k++) {
+      const [dx0, dz0] = rot(-1.4 + rng() * 3, -0.8);
+      const [dx1, dz1] = rot(-1.4 + rng() * 3, 0.8);
+      const vcol = _c.copy(COL.vine).multiplyScalar(0.55 + rng() * 0.4).clone();
+      const dy = 1.05 + (rng() - 0.5) * 0.3;
+      B.vine.quad([dx0, dy, dz0], [dx1, dy, dz1], [dx1, dy - 0.9 - rng() * 0.5, dz1], [dx0, dy - 0.9 - rng() * 0.5, dz0], [0, 0, 1, 1], vcol);
+    }
+  }
   const hw = Math.abs(Math.cos(ang)) * 2.15 + Math.abs(Math.sin(ang)) * 0.95;
   const hd = Math.abs(Math.sin(ang)) * 2.15 + Math.abs(Math.cos(ang)) * 0.95;
   colData.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd, h: 1.35, vine: false });
@@ -707,6 +1029,13 @@ function addCar(B, colData, rng, x, z, ang) {
 function addLamp(B, colData, rng, x, z, armAng) {
   const pole = _c.copy(COL.lampPole).multiplyScalar(0.8 + rng() * 0.3).clone();
   B.plain.addGeo(tplCyl, compose(x, 0, z, 0.09, 4.6, 0.09), pole, 0, rng);
+  // ivy creeping up the pole (visual only): a couple of narrow vine ribbons on facing sides
+  if (rng() < 0.7) {
+    const vh = 1.6 + rng() * 2.4, vw = 0.26 + rng() * 0.2, o = 0.11;
+    const vcol = _c.copy(COL.vine).multiplyScalar(0.6 + rng() * 0.35).clone();
+    B.vine.quad([x - vw / 2, 0, z + o], [x + vw / 2, 0, z + o], [x + vw / 2, vh, z + o], [x - vw / 2, vh, z + o], [0, 0, 1, Math.max(1, vh / 2 | 0)], vcol);
+    if (rng() < 0.5) B.vine.quad([x + o, 0, z - vw / 2], [x + o, 0, z + vw / 2], [x + o, vh * 0.8, z + vw / 2], [x + o, vh * 0.8, z - vw / 2], [0, 0, 1, 1], vcol);
+  }
   const dx = Math.cos(armAng), dz = Math.sin(armAng);
   B.plain.addGeo(tplBox, compose(x + dx * 0.75, 4.42, z + dz * 0.75, 1.6, 0.12, 0.12, 0, -armAng, 0), pole, 0, rng);
   const head = compose(x + dx * 1.45, 4.18, z + dz * 1.45, 0.55, 0.2, 0.32, 0, -armAng, 0);
@@ -718,8 +1047,9 @@ function addLamp(B, colData, rng, x, z, armAng) {
 }
 
 /* ---- power poles & sagging wires ---- */
-function wireSpan(B, ax, ay, az, bx, by, bz, sag) {
+function wireSpan(B, ax, ay, az, bx, by, bz, sag, rng) {
   const segs = 5, w = 0.05;
+  const rand = rng || Math.random;
   const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz) || 1;
   const px = -dz / L * w, pz = dx / L * w;
   let lx = ax, ly = ay, lz2 = az;
@@ -730,6 +1060,19 @@ function wireSpan(B, ax, ay, az, bx, by, bz, sag) {
     B.plain.quad([lx - px, ly, lz2 - pz], [lx + px, ly, lz2 + pz], [nx + px, ny, nz + pz], [nx - px, ny, nz - pz], [0, 0, 1, 1], COL.wire);
     B.plain.quad([lx + px, ly, lz2 + pz], [lx - px, ly, lz2 - pz], [nx - px, ny, nz - pz], [nx + px, ny, nz + pz], [0, 0, 1, 1], COL.wire);
     lx = nx; ly = ny; lz2 = nz;
+  }
+  // short dangling vine ribbons hanging off the wire (visual only) — sampled along the catenary.
+  // Only the wire that was handed a deterministic rng sprouts them (keeps the lower wire bare).
+  const nHang = rng ? 2 + (rand() * 4 | 0) : 0;
+  for (let k = 0; k < nHang; k++) {
+    const t = 0.12 + rand() * 0.76;
+    const hx = lerp(ax, bx, t), hz = lerp(az, bz, t);
+    const hy = lerp(ay, by, t) - Math.sin(t * Math.PI) * sag;
+    const len = 1.2 + rand() * 3.0, ww = 0.3 + rand() * 0.4;
+    const a = rand() * Math.PI, ddx = Math.cos(a) * ww / 2, ddz = Math.sin(a) * ww / 2;
+    const col = _c.copy(COL.vine).multiplyScalar(0.62 + rand() * 0.4).clone();
+    B.vine.quad([hx - ddx, hy - len, hz - ddz], [hx + ddx, hy - len, hz + ddz], [hx + ddx, hy, hz + ddz], [hx - ddx, hy, hz - ddz],
+      [0, 0, 1, Math.max(1, Math.round(len / 2))], col);
   }
 }
 function addPowerPole(B, colData, rng, x, z, axis) {
@@ -762,13 +1105,384 @@ function addStall(B, colData, rng, x, z, ang) {
   colData.solids.push({ x0: x - 1.6, z0: z - 1.3, x1: x + 1.6, z1: z + 1.3, h: 0.9, vine: false });
 }
 
+/* ======================================================================== */
+/*  ANOMALIES (Phase A) — Tier 1 landmarks + Tier 2 elevated line           */
+/* ======================================================================== */
+// A tilted flat slab: one box oriented by yaw (travel dir about +y) then pitched about
+// its local x-axis. Used for fallen-tower shells and collapsed viaduct ramps.
+const _qYaw = new THREE.Quaternion(), _qPit = new THREE.Quaternion(), _axX = new THREE.Vector3(1, 0, 0);
+function composeSlab(x, y, z, sx, sy, sz, pitch, yaw) {
+  _qYaw.setFromAxisAngle(_up, yaw);
+  _qPit.setFromAxisAngle(_axX, -pitch);
+  _qYaw.multiply(_qPit);
+  _pv.set(x, y, z); _s.set(sx, sy, sz);
+  return _m4.compose(_pv, _qYaw, _s);
+}
+// A walkable staircase of overlapping pads rising along an incline (collision only).
+function rampPads(colData, x0, y0, z0, x1, y1, z1, r, layer) {
+  const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0, L = Math.hypot(dx, dy, dz);
+  const n = Math.max(2, Math.round(L / 1.3));
+  for (let k = 0; k <= n; k++) { const t = k / n; colData.pads.push({ x: x0 + dx * t, z: z0 + dz * t, r, y: y0 + dy * t, layer: layer || 'ramp' }); }
+}
+
+// TIER 1 — colossus: a mega-tree piercing all three veils, with root buttresses, a
+// spiral limb staircase, a crown nest hamlet and a beacon. Trunk is climbable (r 6, h 55).
+function addColossus(B, colData, mini, rng, ox, oz) {
+  const x = ox + 32, z = oz + 32, h = 55, R = 18, tr = 6;
+  addTree(B, colData, mini, rng, x, z, h, R, { trunkR: tr, blobs: 9 });   // trunk+roots+canopy+pad+minidot
+  // root buttresses — big leaning roots you can walk between (thin trunks keep gaps open)
+  const nBut = 4 + (rng() * 3 | 0);
+  for (let k = 0; k < nBut; k++) {
+    const a = k / nBut * Math.PI * 2 + rng() * 0.3, bw = tr * 0.5;
+    B.plain.addGeo(tplRoot, compose(x + Math.cos(a) * tr * 0.7, 0, z + Math.sin(a) * tr * 0.7, bw, tr * 2.2, bw, Math.sin(a) * 0.9, 0, -Math.cos(a) * 0.9), COL.barkDark, 0.14, rng);
+    colData.trunks.push({ x: x + Math.cos(a) * (tr + 1.2), z: z + Math.sin(a) * (tr + 1.2), r: bw * 0.6, h: 3 });
+  }
+  // spiral limb staircase ground → crown (pads register a walkable ramp; also the trunk climbs)
+  let ang = rng() * 7, py = 2, px = x + Math.cos(ang) * (tr + 2.2), pz = z + Math.sin(ang) * (tr + 2.2);
+  const steps = 11, dyStep = (46 - py) / steps, rad = tr + 2.2;
+  for (let k = 0; k < steps; k++) {
+    ang += Math.PI * 0.62;
+    const ny = py + dyStep, nx = x + Math.cos(ang) * rad, nz = z + Math.sin(ang) * rad;
+    addLimb(B, colData, rng, px, py, pz, nx, ny, nz, 0.55, { segs: 2, sag: 0.15, layer: 'bough' });
+    px = nx; py = ny; pz = nz;
+  }
+  // crown nest hamlet, linked by short limb bridges + giant leaf blobs
+  const nests = [], nN = 3 + (rng() < 0.5 ? 1 : 0);
+  for (let k = 0; k < nN; k++) {
+    const a = k / nN * Math.PI * 2 + rng() * 0.4, d = R * 0.5 + rng() * 2.5;
+    const nx = x + Math.cos(a) * d, nz = z + Math.sin(a) * d, ny = 47 + rng() * 4;
+    addCrownNest(B, colData, rng, nx, ny, nz, 2.6 + rng() * 1.2);
+    nests.push([nx, ny, nz]);
+    const br = R * 0.4; B.leaf.addGeo(tplBlob, compose(nx, ny + 3.4, nz, br, br * 0.6, br, 0, rng() * 7, 0), leafTintByY(COL.leafB, ny + 3.4), 0.2, rng);
+  }
+  for (let k = 0; k < nests.length; k++) {
+    const A = nests[k], C = nests[(k + 1) % nests.length];
+    addLimb(B, colData, rng, A[0], A[1], A[2], C[0], C[1], C[2], 0.4, { segs: 2, sag: 0.4, layer: 'bough' });
+  }
+  B.lamp.addGeo(tplBlob, compose(x, h + 1.5, z, 0.7, 0.7, 0.7), srgb(0xffe0b0), 0, rng);   // beacon
+  colData.trunks.push({ x, z, r: 0.3, h: h + 1.5 });
+  mini.trees.push([x, z, R * 1.6, 0]);                                                     // bold minimap dot
+}
+
+// TIER 1 — fallen: a standing tower with a collapsed tower leaning against it as a
+// walkable ramp (street → roof), plus rubble and vine streamers.
+function addFallen(B, colData, mini, rng, ox, oz) {
+  const h = 28 + rng() * 8;
+  const sx = ox + 24 + rng() * 6, sz = oz + 40 + rng() * 6, w = 12 + rng() * 3, d = 12 + rng() * 3;
+  addBuilding(B, colData, mini, rng, sx, sz, w, d, h, { vines: true, allSides: true, garden: false });
+  // fallen shell leans from a street base up to the standing tower's south face at roof height
+  const baseX = sx, baseZ = sz - d / 2 - h * 0.72, topX = sx, topZ = sz - d / 2 - 1, topY = h - 1;
+  const dxx = topX - baseX, dzz = topZ - baseZ, horiz = Math.hypot(dxx, dzz);
+  const L = Math.hypot(horiz, topY), pitch = Math.atan2(topY, horiz), yaw = Math.atan2(dxx, dzz);
+  const shellCol = _c.copy(COL.roof).multiplyScalar(0.8).clone();
+  B.plain.addGeo(tplBoxC, composeSlab((baseX + topX) / 2, topY / 2, (baseZ + topZ) / 2, w * 0.9, 1.4, L, pitch, yaw), shellCol, 0.1, rng);
+  rampPads(colData, baseX, 0.1, baseZ, topX, topY, topZ, 2.0, 'fallen');   // walkable incline
+  for (let k = 0; k < 7; k++) {                                            // rubble field
+    const rr = 1 + rng() * 1.8, rx = baseX + (rng() - 0.5) * 12, rz = baseZ + (rng() - 0.5) * 7;
+    B.plain.addGeo(tplRock, compose(rx, rr * 0.2, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+    colData.trunks.push({ x: rx, z: rz, r: rr * 0.7, h: rr * 0.6 });
+  }
+  for (let k = 0; k < 6; k++) {                                            // vine streamers on the shell
+    const t = 0.2 + rng() * 0.7, cxp = lerp(baseX, topX, t), czp = lerp(baseZ, topZ, t), cyp = lerp(1.5, topY, t);
+    addCurtain(B, rng, cxp - 2, cyp, czp, cxp + 2, cyp, czp);
+  }
+}
+
+// TIER 1 — sinkhole: the block interior caved into a bowl. A per-chunk `pit` descriptor
+// lets stepPlayer drop the ground below y=0 inside the pit radius.
+function addSinkhole(B, colData, mini, rng, ox, oz) {
+  const cx = ox + 32, cz = oz + 32, pitR = 15, depth = 4;
+  colData.pits.push({ x: cx, z: cz, r: pitR, depth });
+  // dark pit floor disc + a grid of floor pads (collision only)
+  B.plain.addGeo(new THREE.CylinderGeometry(pitR * 0.82, pitR * 0.62, 0.6, 22), compose(cx, -depth - 0.3, cz, 1, 1, 1), _c.copy(COL.rock).multiplyScalar(0.5).clone(), 0.12, rng);
+  for (let gx = -pitR + 2; gx <= pitR - 2; gx += 2.4) for (let gz = -pitR + 2; gz <= pitR - 2; gz += 2.4) {
+    if (gx * gx + gz * gz > (pitR - 2) * (pitR - 2)) continue;
+    colData.pads.push({ x: cx + gx, z: cz + gz, r: 1.6, y: -depth, layer: 'pit' });
+  }
+  const nRim = 26;
+  for (let k = 0; k < nRim; k++) {                                        // rock rim ring
+    const a = k / nRim * Math.PI * 2, rr = 1.4 + rng() * 1.6;
+    B.plain.addGeo(tplRock, compose(cx + Math.cos(a) * pitR, 0.1, cz + Math.sin(a) * pitR, rr, rr * 0.7, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+    const rd = pitR * 0.6, wr = 2 + rng() * 1.5;                          // inward-angled wall slab
+    B.plain.addGeo(tplRock, compose(cx + Math.cos(a) * rd, -2, cz + Math.sin(a) * rd, wr, wr, wr, Math.cos(a) * 0.4, rng() * 7, Math.sin(a) * 0.4), _c.copy(COL.rock).multiplyScalar(0.7).clone(), 0.2, rng);
+  }
+  for (let k = 0; k < 10; k++) {                                          // hanging roots (vine ribbons)
+    const a = rng() * 7, rx = cx + Math.cos(a) * pitR * 0.9, rz = cz + Math.sin(a) * pitR * 0.9;
+    const len = 2 + rng() * 3, wv = 0.3 + rng() * 0.4, col = _c.copy(COL.vine).multiplyScalar(0.5 + rng() * 0.3).clone();
+    B.vine.quad([rx - wv / 2, 0.3 - len, rz], [rx + wv / 2, 0.3 - len, rz], [rx + wv / 2, 0.3, rz], [rx - wv / 2, 0.3, rz], [0, 0, 1, Math.max(1, len / 2 | 0)], col);
+  }
+  for (let k = 0; k < 3; k++) {                                           // climbable roots back out (r 0.4, tall enough to climb)
+    const a = rng() * 7, rx = cx + Math.cos(a) * (pitR - 0.5), rz = cz + Math.sin(a) * (pitR - 0.5);
+    B.plain.addGeo(tplRoot, compose(rx, -depth, rz, 0.4, depth + 2, 0.4, 0, rng() * 7, 0), COL.barkDark, 0.15, rng);
+    colData.trunks.push({ x: rx, z: rz, r: 0.4, h: 16 });                 // h>14 → the climb code engages
+  }
+  for (let k = 0; k < 11; k++) {                                          // dense glow garden at the bottom
+    const a = rng() * 7, dd = rng() * (pitR - 3), s = 0.3 + rng() * 0.3;
+    B.glow.addGeo(tplBlob, compose(cx + Math.cos(a) * dd, -depth + 0.3, cz + Math.sin(a) * dd, s, s * 0.7, s, 0, rng() * 7, 0), COL.glowPlant, 0.3, rng);
+  }
+}
+
+// TIER 1 — reservoir: a wide low open tank filled with still water. Wading inside drains
+// heat fast. Built as 4 climbable rim walls + an interior wade floor + a water plane.
+function addReservoir(B, colData, mini, rng, ox, oz, extra) {
+  const cx = ox + 32, cz = oz + 32, half = 15, h = 8, waterY = 7.8, floorY = waterY - 0.7;
+  const x0 = cx - half, x1 = cx + half, z0 = cz - half, z1 = cz + half, wt = 0.7;
+  const wallCol = _c.copy(COL.roof).lerp(COL.moss, 0.35).multiplyScalar(0.7).clone();
+  const walls = [[cx, z0 + wt / 2, 2 * half, wt], [cx, z1 - wt / 2, 2 * half, wt], [x0 + wt / 2, cz, wt, 2 * half], [x1 - wt / 2, cz, wt, 2 * half]];
+  for (const [wx, wz, ww, wd] of walls) {
+    B.plain.addGeo(tplBox, compose(wx, 0, wz, ww, h, wd), wallCol, 0.08, rng);
+    colData.solids.push({ x0: wx - ww / 2, z0: wz - wd / 2, x1: wx + ww / 2, z1: wz + wd / 2, h, vine: true });  // walkable parapet, climbable
+  }
+  // interior wade floor (player stands here, ~0.7 m under the surface)
+  B.plain.quad([x0, floorY, z1], [x1, floorY, z1], [x1, floorY, z0], [x0, floorY, z0], [0, 0, 1, 1], _c.copy(COL.rock).multiplyScalar(0.55).clone());
+  colData.solids.push({ x0, z0, x1, z1, h: floorY, vine: false });
+  // still water plane (one extra mesh added to the chunk group)
+  const wm = new THREE.Mesh(new THREE.PlaneGeometry(2 * half - wt, 2 * half - wt), matWater);
+  wm.rotation.x = -Math.PI / 2; wm.position.set(cx, waterY, cz); wm.matrixAutoUpdate = false; wm.updateMatrix();
+  extra.push(wm);
+  colData.waters.push({ x0: x0 + wt, z0: z0 + wt, x1: x1 - wt, z1: z1 - wt, y: waterY });   // interior only (not the parapet)
+  for (let k = 0; k < 3; k++) {                                           // ladders/vines up the outside
+    const a = k / 3 * Math.PI * 2 + rng();
+    addVineRope(B, colData, rng, cx + Math.cos(a) * (half + 0.1), cz + Math.sin(a) * (half + 0.1), h, 0);
+  }
+  for (let k = 0; k < 4; k++) addGlowPlant(B, rng, lerp(x0 + 1, x1 - 1, rng()), lerp(z0 + 1, z1 - 1, rng()), 0.22);
+  mini.rects.push([x0, z0, 2 * half, 2 * half, h]);
+}
+
+// TIER 2 — the Elevated Line. A ruined viaduct along rare grid lines, chosen per line
+// index so every chunk on the line renders its own share identically.
+function uvToXZ(axis, cross, u) { return axis === 0 ? [cross, u] : [u, cross]; }
+function addPier(B, colData, rng, axis, cross, u, y) {
+  const [px, pz] = uvToXZ(axis, cross, u);
+  B.plain.addGeo(tplBox, compose(px, 0, pz, 1.6, y - 0.3, 1.6), srgb(0x6f6f68), 0.06, rng);
+  colData.trunks.push({ x: px, z: pz, r: 0.9, h: y - 0.3 });   // side-block only (h<14 → not climbable, r<1.2 → not a giant)
+  // ivy climbing the concrete piers (visual only)
+  const nv = 2 + (rng() * 3 | 0);
+  for (let k = 0; k < nv; k++) {
+    const side = (rng() * 4) | 0, o = 0.82, half = 0.7;
+    const top = (y - 0.3) * (0.4 + rng() * 0.55), len = top * (0.5 + rng() * 0.5), vw = 0.4 + rng() * 0.5;
+    const off = (rng() - 0.5) * half;
+    const vcol = _c.copy(COL.vine).multiplyScalar(0.55 + rng() * 0.35).clone(), vRep = Math.max(1, len / 4 | 0);
+    let a, b, c2, d;
+    if (side === 0) { a = [px + o, top - len, pz + off - vw / 2]; b = [px + o, top - len, pz + off + vw / 2]; c2 = [px + o, top, pz + off + vw / 2]; d = [px + o, top, pz + off - vw / 2]; }
+    else if (side === 1) { a = [px - o, top - len, pz + off + vw / 2]; b = [px - o, top - len, pz + off - vw / 2]; c2 = [px - o, top, pz + off - vw / 2]; d = [px - o, top, pz + off + vw / 2]; }
+    else if (side === 2) { a = [px + off + vw / 2, top - len, pz + o]; b = [px + off - vw / 2, top - len, pz + o]; c2 = [px + off - vw / 2, top, pz + o]; d = [px + off + vw / 2, top, pz + o]; }
+    else { a = [px + off - vw / 2, top - len, pz - o]; b = [px + off + vw / 2, top - len, pz - o]; c2 = [px + off + vw / 2, top, pz - o]; d = [px + off - vw / 2, top, pz - o]; }
+    B.vine.quad(a, b, c2, d, [0, 0, 1, vRep], vcol);
+  }
+}
+function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
+  const y = 9, hw = 3, spanLen = 16;
+  const lineIdx = axis === 0 ? ix : iz;
+  const base0 = axis === 0 ? oz : ox, cross = axis === 0 ? ox : oz;
+  const spanBase = (axis === 0 ? iz : ix) * 4;
+  const concrete = srgb(0x8a8a82), rail = _c.copy(COL.rock).multiplyScalar(0.9).clone();
+  for (let sp = 0; sp < 4; sp++) {
+    const gi = spanBase + sp, u0 = base0 + sp * spanLen, u1 = u0 + spanLen;
+    addPier(B, colData, rng, axis, cross, u0, y);
+    const exists = (hash2(lineIdx, gi, 6003) % 100) < 75;
+    if (!exists) {                                       // fallen span: debris on the street below
+      for (let k = 0; k < 4; k++) {
+        const rr = 1 + rng() * 1.4, [dx, dz] = uvToXZ(axis, cross + (rng() - 0.5) * 4, u0 + 2 + rng() * (spanLen - 4));
+        B.plain.addGeo(tplRock, compose(dx, rr * 0.2, dz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+      }
+      continue;
+    }
+    const [mx, mz] = uvToXZ(axis, cross, (u0 + u1) / 2);
+    if (axis === 0) B.plain.addGeo(tplBoxC, compose(mx, y - 0.3, mz, hw * 2, 0.6, spanLen), concrete, 0.06, rng);
+    else B.plain.addGeo(tplBoxC, compose(mx, y - 0.3, mz, spanLen, 0.6, hw * 2), concrete, 0.06, rng);
+    for (let du = 0; du <= spanLen; du += 1.3) {          // dense walkable deck pads (raised deck → pads, not a ground-up solid)
+      for (let dw = -1; dw <= 1; dw++) { const [px, pz] = uvToXZ(axis, cross + dw * 2, u0 + du); colData.pads.push({ x: px, z: pz, r: 1.4, y, layer: 'viaduct' }); }
+    }
+    for (const edge of [-hw, hw]) {                       // guard rails
+      const [rx, rz] = uvToXZ(axis, cross + edge, (u0 + u1) / 2);
+      if (axis === 0) B.plain.addGeo(tplBox, compose(rx, y, rz, 0.15, 0.7, spanLen), rail, 0.05, rng);
+      else B.plain.addGeo(tplBox, compose(rx, y, rz, spanLen, 0.7, 0.15), rail, 0.05, rng);
+    }
+    if (rng() < 0.55) {                                  // sapling on the deck
+      const [tx, tz] = uvToXZ(axis, cross + (rng() - 0.5) * 3, u0 + 2 + rng() * (spanLen - 4)), sr = 0.8 + rng() * 0.7;
+      B.plain.addGeo(tplTrunk, compose(tx, y, tz, 0.14, 1.4 + rng(), 0.14, 0, rng() * 7, 0), COL.bark, 0.1, rng);
+      B.leaf.addGeo(tplBlob, compose(tx, y + 2, tz, sr, sr * 0.7, sr, 0, rng() * 7, 0), leafTintByY(COL.leafB, y + 2), 0.2, rng);
+    }
+    if (rng() < 0.7) {                                   // grass tuft on the deck
+      const [gx, gz] = uvToXZ(axis, cross + (rng() - 0.5) * 4, u0 + rng() * spanLen), s = 0.4 + rng() * 0.4;
+      const col = rng() < 0.5 ? COL.grassA : COL.grassB, dark = _c.copy(col).multiplyScalar(0.5).clone();
+      B.grass.quad([gx - 0.2, y, gz], [gx + 0.2, y, gz], [gx + 0.2, y + s, gz], [gx - 0.2, y + s, gz], [0, 0, 1, 1], col, dark);
+    }
+    if (hash2(lineIdx, gi, 6005) % 9 === 0) {            // stranded rusted bus
+      const [bx, bz] = uvToXZ(axis, cross, (u0 + u1) / 2), bcol = _c.copy(COL.rust).lerp(srgb(0x5a7a55), 0.4).clone();
+      if (axis === 0) B.plain.addGeo(tplBoxC, compose(bx, y + 1.2, bz, 2.4, 2.2, 8), bcol, 0.06, rng);
+      else B.plain.addGeo(tplBoxC, compose(bx, y + 1.2, bz, 8, 2.2, 2.4), bcol, 0.06, rng);
+    }
+  }
+  // access ramp on ~1/3 of chunks along the line: a collapsed slab down to the street beside the deck
+  if (hash2(lineIdx, axis === 0 ? iz : ix, 6004) % 3 === 0) {
+    const sgn = (hash2(lineIdx, 7, 6004) % 2) ? 1 : -1, u = base0 + 24;
+    const [tx, tz] = uvToXZ(axis, cross + sgn * hw, u), [bx, bz] = uvToXZ(axis, cross + sgn * (hw + 7), u);
+    rampPads(colData, bx, 0.1, bz, tx, y, tz, 2.0, 'viaduct');
+    const dxx = tx - bx, dzz = tz - bz, horiz = Math.hypot(dxx, dzz);
+    B.plain.addGeo(tplBoxC, composeSlab((bx + tx) / 2, y / 2, (bz + tz) / 2, 4, 0.5, Math.hypot(horiz, y), Math.atan2(y, horiz), Math.atan2(dxx, dzz)), srgb(0x7f7f77), 0.06, rng);
+  }
+}
+function addViaduct(B, colData, mini, rng, ix, iz, ox, oz) {
+  if (hash2(ix, 0, 6001) % 7 === 0) buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, 0);  // runs in z along x=ox
+  if (hash2(0, iz, 6002) % 7 === 0) buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, 1);  // runs in x along z=oz
+}
+
+/* ======================================================================== */
+/*  TIER 3 ODDITIES (Phase B) — sprinkled deterministically at low rates     */
+/* ======================================================================== */
+
+// Greenhouse skeleton: 4–6 rusty arched ribs over a small footprint, a few surviving
+// pale glass shards (lamp batch, faint night glint), dense glow plants + ferns inside,
+// a rusted table. Visual only.
+function addGreenhouse(B, colData, rng, cx, cz) {
+  const L = 7 + rng() * 3, W = 4.5 + rng() * 2, archH = 3.2 + rng() * 1.2;
+  const nRibs = 4 + (rng() * 3 | 0);
+  const rust = _c.copy(COL.rust).multiplyScalar(0.8 + rng() * 0.4).clone();
+  const glass = srgb(0xbfd8e0);
+  const ribX = [];
+  for (let r = 0; r < nRibs; r++) {
+    const rx = cx - L / 2 + (r / (nRibs - 1)) * L;
+    ribX.push(rx);
+    const segs = 6;
+    let prev = null;
+    for (let k = 0; k <= segs; k++) {
+      const t = k / segs, ang = t * Math.PI;
+      const p = [rx, Math.sin(ang) * archH, cz + Math.cos(ang) * W / 2];
+      if (prev) B.plain.addGeo(tplCyl, segMat(prev[0], prev[1], prev[2], p[0], p[1], p[2], 0.07), rust, 0.12, rng);
+      prev = p;
+    }
+  }
+  // a couple of ridge purlins tying ribs together at the top
+  B.plain.addGeo(tplCyl, segMat(ribX[0], archH, cz, ribX[ribX.length - 1], archH, cz, 0.06), rust, 0.1, rng);
+  // surviving glass shards: quads spanning between adjacent ribs up near the crown
+  for (let r = 0; r < nRibs - 1; r++) {
+    if (rng() < 0.55) continue;
+    const x0 = ribX[r], x1 = ribX[r + 1];
+    const t = 0.2 + rng() * 0.5, ang = t * Math.PI;
+    const zc = cz + Math.cos(ang) * W / 2, yc = Math.sin(ang) * archH;
+    const zc2 = cz + Math.cos((t + 0.18) * Math.PI) * W / 2, yc2 = Math.sin((t + 0.18) * Math.PI) * archH;
+    B.lamp.quad([x0, yc, zc], [x1, yc, zc], [x1, yc2, zc2], [x0, yc2, zc2], [0, 0, 1, 1], glass);
+  }
+  // dense glow plants + ferns inside, a rusted table
+  for (let k = 0; k < 4 + (rng() * 3 | 0); k++)
+    addGlowPlant(B, rng, cx + (rng() - 0.5) * L * 0.8, cz + (rng() - 0.5) * W * 0.7, 0.22 + rng() * 0.25);
+  for (let k = 0; k < 5 + (rng() * 4 | 0); k++)
+    addFern(B, rng, cx + (rng() - 0.5) * L * 0.8, cz + (rng() - 0.5) * W * 0.7, rng() * 7, 1.0 + rng() * 0.8);
+  if (rng() < 0.7) {
+    const tx = cx + (rng() - 0.5) * L * 0.5, tz = cz + (rng() - 0.5) * W * 0.4;
+    B.plain.addGeo(tplBox, compose(tx, 0.7, tz, 1.8, 0.1, 0.8, 0, rng() * 7, 0), COL.rust, 0.12, rng);
+    for (const lx of [-0.7, 0.7]) B.plain.addGeo(tplCyl, compose(tx + lx, 0, tz, 0.05, 0.7, 0.05), COL.rust, 0, rng);
+  }
+}
+
+// A single arched fern frond: a scaled-up grass quad leaning outward. Visual only.
+function addFern(B, rng, x, z, ang, s) {
+  const tx = -Math.sin(ang), tz = Math.cos(ang);            // tangential (blade width)
+  const ox2 = Math.cos(ang), oz2 = Math.sin(ang);           // radial outward (lean)
+  const w = 0.5 + rng() * 0.5, lean = s * (0.4 + rng() * 0.4);
+  const tipx = x + ox2 * lean, tipz = z + oz2 * lean;
+  const col = rng() < 0.5 ? COL.grassA : COL.leafC, dark = _c.copy(col).multiplyScalar(0.5).clone();
+  B.grass.quad(
+    [x - tx * w / 2, 0, z - tz * w / 2], [x + tx * w / 2, 0, z + tz * w / 2],
+    [tipx + tx * w / 2, s, tipz + tz * w / 2], [tipx - tx * w / 2, s, tipz - tz * w / 2],
+    [0, 0, 1, 1], col, dark);
+}
+
+// Wind-chime pole: a slim pole + cross arm, 5–8 hanging strings each with a small bottle/
+// shell. Registers a chime point so the audio loop can tinkle when the player is near.
+function addWindChime(B, colData, rng, x, z) {
+  const ph = 3.6 + rng() * 0.8;
+  B.plain.addGeo(tplCyl, compose(x, 0, z, 0.07, ph, 0.07), COL.wood, 0.1, rng);
+  const armAng = rng() * Math.PI, ax = Math.cos(armAng), az = Math.sin(armAng), arm = 1.1;
+  B.plain.addGeo(tplBox, compose(x, ph, z, arm * 2, 0.06, 0.06, 0, -armAng, 0), COL.wood, 0.1, rng);
+  colData.trunks.push({ x, z, r: 0.1, h: ph });
+  const n = 5 + (rng() * 4 | 0);
+  for (let k = 0; k < n; k++) {
+    const t = (k / (n - 1) - 0.5) * 2;
+    const hx = x + ax * arm * t, hz = z + az * arm * t;
+    const sl = 0.5 + rng() * 0.7;                            // string length
+    B.plain.addGeo(tplCyl, compose(hx, ph - sl, hz, 0.012, sl, 0.012), COL.wire, 0, rng);
+    // little bottle / shell at the end (tiny box or cylinder), warm-tinted so it catches light
+    const bcol = _c.copy(rng() < 0.5 ? srgb(0x9ab0a2) : srgb(0xb99a6a)).multiplyScalar(0.8 + rng() * 0.4).clone();
+    if (rng() < 0.5) B.plain.addGeo(tplCyl, compose(hx, ph - sl - 0.22, hz, 0.05, 0.24, 0.05), bcol, 0.1, rng);
+    else B.plain.addGeo(tplBox, compose(hx, ph - sl - 0.2, hz, 0.11, 0.22, 0.07, 0, rng() * 7, 0), bcol, 0.1, rng);
+  }
+  colData.chimes.push({ x, z });
+}
+
+// Shrine niche at a building corner: a small stone shelf, 2–3 candle stubs with lamp-
+// material flame dots (glow at night), and warm dried-flower tufts. Visual only.
+function addShrine(B, colData, rng, s) {
+  // pick an outward-facing corner of the solid s
+  const corners = [[s.x0, s.z0], [s.x1, s.z0], [s.x1, s.z1], [s.x0, s.z1]];
+  const cn = corners[(rng() * 4) | 0];
+  const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
+  const ox2 = cn[0] < cx ? -1 : 1, oz2 = cn[1] < cz ? -1 : 1;
+  const sx = cn[0] + ox2 * 0.5, sz = cn[1] + oz2 * 0.5, sy = 1.1 + rng() * 0.5;
+  const stone = _c.copy(COL.rock).lerp(COL.moss, 0.2).clone();
+  B.plain.addGeo(tplBox, compose(sx, sy, sz, 1.1, 0.5, 0.9, 0, rng() * 0.4, 0), stone, 0.1, rng);   // shelf box
+  const nC = 2 + (rng() * 2 | 0);
+  for (let k = 0; k < nC; k++) {
+    const dx = (rng() - 0.5) * 0.6, dz = (rng() - 0.5) * 0.4;
+    B.plain.addGeo(tplCyl, compose(sx + dx, sy + 0.25, sz + dz, 0.05, 0.16 + rng() * 0.12, 0.05), srgb(0xd8cdb0), 0.06, rng);  // candle stub
+    B.lamp.addGeo(tplBlob, compose(sx + dx, sy + 0.45, sz + dz, 0.05, 0.08, 0.05), srgb(0xffdf9c), 0, rng);                   // flame dot (night emissive)
+  }
+  // dried-flower tufts (warm-tinted grass) at the shelf base
+  for (let k = 0; k < 3; k++) {
+    const fx = sx + (rng() - 0.5) * 0.8, fz = sz + (rng() - 0.5) * 0.6;
+    const warm = _c.copy(COL.leafDry).lerp(srgb(0xc06a3a), rng() * 0.5).clone(), dark = _c.copy(warm).multiplyScalar(0.5).clone();
+    const ss = 0.25 + rng() * 0.2;
+    B.grass.quad([fx - 0.08, sy + 0.5, fz], [fx + 0.08, sy + 0.5, fz], [fx + 0.08, sy + 0.5 + ss, fz], [fx - 0.08, sy + 0.5 + ss, fz], [0, 0, 1, 1], warm, dark);
+  }
+}
+
+// Fern circle: a ring of 8–12 oversized fronds with a glow-plant centre. Registers a fern
+// descriptor so standing inside at night can trigger a flavour message.
+function addFernCircle(B, colData, rng, cx, cz) {
+  const R = 3 + rng() * 2, n = 8 + (rng() * 5 | 0);
+  for (let k = 0; k < n; k++) {
+    const a = k / n * Math.PI * 2 + rng() * 0.2;
+    addFern(B, rng, cx + Math.cos(a) * R, cz + Math.sin(a) * R, a, 2.0 + rng() * 1.0);
+  }
+  addGlowPlant(B, rng, cx, cz, 0.3 + rng() * 0.2);
+  colData.ferns.push({ x: cx, z: cz, r: R });
+}
+
+// Dispatcher — decide at most one oddity per chunk on independent hash salts (so the rng
+// stream and the rest of the chunk are undisturbed by the choice), then draw with rng.
+function addOddities(B, colData, rng, ix, iz, ox, oz, type) {
+  const b0 = INSET, b1 = CHUNK - INSET;
+  const pct = (salt) => hash2(ix, iz, salt) % 100;
+  if ((type === 'park' || type === 'grove') && pct(3221) < 20) {
+    addFernCircle(B, colData, rng, ox + lerp(b0 + 6, b1 - 6, rng()), oz + lerp(b0 + 6, b1 - 6, rng()));
+    return;
+  }
+  if ((type === 'park' || type === 'plaza') && pct(3111) < 8) {
+    addGreenhouse(B, colData, rng, ox + lerp(b0 + 8, b1 - 8, rng()), oz + lerp(b0 + 6, b1 - 6, rng()));
+    return;
+  }
+  if (type === 'city' && pct(3333) < 12) {
+    const cands = colData.solids.filter(s => s.h >= 8 && s.x1 - s.x0 > 4 && s.z1 - s.z0 > 4);
+    if (cands.length) { addShrine(B, colData, rng, cands[(rng() * cands.length) | 0]); return; }
+  }
+  if (pct(3444) < 10) {
+    const near = rng() < 0.5;
+    const x = near ? ox + (rng() < 0.5 ? 7 : CHUNK - 7) : ox + lerp(10, CHUNK - 10, rng());
+    const z = near ? oz + lerp(10, CHUNK - 10, rng()) : oz + (rng() < 0.5 ? 7 : CHUNK - 7);
+    addWindChime(B, colData, rng, x, z);
+  }
+}
+
 function buildChunk(ix, iz) {
   const rng = mulberry32(hash2(ix, iz, 999));
   const type = chunkType(ix, iz);
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch() };
-  const colData = { solids: [], trunks: [], pads: [], lamps: [] };
+  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [] };
   const mini = { rects: [], trees: [], type };
+  const extraMeshes = [];   // non-batched meshes (e.g. reservoir water plane)
   let openRect = null; // area open to the sky at ground level
 
   /* ---- street trees along west (x=ox) and south (z=oz) borders ---- */
@@ -796,8 +1510,8 @@ function buildChunk(ix, iz) {
     const P = [4, 25, 46, 68].map(t => axis === 0 ? [ox + pside, oz + t] : [ox + t, oz + pside]);
     for (let k = 0; k < 3; k++) {
       addPowerPole(B, colData, rng, P[k][0], P[k][1], axis);
-      wireSpan(B, P[k][0], 6.7, P[k][1], P[k + 1][0], 6.7, P[k + 1][1], 0.7 + rng() * 0.5);
-      wireSpan(B, P[k][0], 6.35, P[k][1], P[k + 1][0], 6.35, P[k + 1][1], 0.6 + rng() * 0.5);
+      wireSpan(B, P[k][0], 6.7, P[k][1], P[k + 1][0], 6.7, P[k + 1][1], 0.7 + rng() * 0.5, rng);
+      wireSpan(B, P[k][0], 6.35, P[k][1], P[k + 1][0], 6.35, P[k + 1][1], 0.6 + rng() * 0.5);   // lower wire kept bare
     }
     // street lamps on the other side
     for (let k = 0; k < 3; k++) {
@@ -927,27 +1641,52 @@ function buildChunk(ix, iz) {
     B.plain.addGeo(tplBox, compose(SPIRE.x + 6, SPIRE.h + 5.5, SPIRE.z + 6, 0.12, 0.12, 2.6), COL.rust, 0.1, rng);
     B.lamp.addGeo(tplBlob, compose(SPIRE.x + 6, SPIRE.h + 10, SPIRE.z + 6, 0.35, 0.35, 0.35), srgb(0xffe0b0), 0, rng);
     colData.trunks.push({ x: SPIRE.x + 6, z: SPIRE.z + 6, r: 0.3, h: SPIRE.h + 10 });
+  } else if (type === 'colossus') {
+    addColossus(B, colData, mini, rng, ox, oz);
+  } else if (type === 'fallen') {
+    addFallen(B, colData, mini, rng, ox, oz);
+  } else if (type === 'sinkhole') {
+    addSinkhole(B, colData, mini, rng, ox, oz);
+  } else if (type === 'reservoir') {
+    addReservoir(B, colData, mini, rng, ox, oz, extraMeshes);
   }
 
   /* ---- hanging vine curtains across the streets ---- */
   if (type !== 'plaza') {
-    const nC = 2 + (rng() * 3 | 0);
+    const nC = 4 + (rng() * 3 | 0);
     for (let k = 0; k < nC; k++) {
       const y1 = 8 + rng() * 7, y2 = 8 + rng() * 7;
-      if (rng() < 0.5) { const z = oz + 8 + rng() * (CHUNK - 16); addCurtain(B, rng, ox - 7, y1, z, ox + 7, y2, z); }
-      else { const x = ox + 8 + rng() * (CHUNK - 16); addCurtain(B, rng, x, y1, oz - 7, x, y2, oz + 7); }
+      const dbl = rng() < 0.3;                          // occasionally a second layer 1 m behind
+      if (rng() < 0.5) {
+        const z = oz + 8 + rng() * (CHUNK - 16);
+        addCurtain(B, rng, ox - 7, y1, z, ox + 7, y2, z);
+        if (dbl) addCurtain(B, rng, ox - 7, y1, z + 1, ox + 7, y2, z + 1);
+      } else {
+        const x = ox + 8 + rng() * (CHUNK - 16);
+        addCurtain(B, rng, x, y1, oz - 7, x, y2, oz + 7);
+        if (dbl) addCurtain(B, rng, x + 1, y1, oz - 7, x + 1, y2, oz + 7);
+      }
     }
   }
 
-  /* ---- grass ---- */
-  const nGrass = type === 'park' ? 170 : type === 'grove' ? 120 : type === 'plaza' ? 60 : 100;
+  /* ---- grass (+~35% density; occasional tall clumps for a more overgrown floor) ---- */
+  const nGrass = type === 'park' ? 230 : type === 'grove' ? 162 : type === 'plaza' ? 80 : 135;
   for (let k = 0; k < nGrass; k++) {
     // bias toward street edges and block border (sidewalks)
     let gx, gz;
     if (rng() < 0.5) { gx = ox + (rng() < 0.5 ? 2 + rng() * 9 : CHUNK - 2 - rng() * 9); gz = oz + rng() * CHUNK; }
     else { gz = oz + (rng() < 0.5 ? 2 + rng() * 9 : CHUNK - 2 - rng() * 9); gx = ox + rng() * CHUNK; }
     if (type === 'park' || type === 'grove') { gx = ox + rng() * CHUNK; gz = oz + rng() * CHUNK; }
-    addGrassTuft(B, rng, gx, gz, 0.45 + rng() * 0.75);
+    const tall = rng() < 0.09;
+    addGrassTuft(B, rng, gx, gz, tall ? 1.2 + rng() * 0.6 : 0.45 + rng() * 0.75);
+  }
+  // root/ivy creep patches on the pavement
+  const nIvy = type === 'plaza' ? 5 : 9 + (rng() * 6 | 0);
+  for (let k = 0; k < nIvy; k++) {
+    let ix2, iz2;
+    if (rng() < 0.6) { ix2 = ox + (rng() < 0.5 ? 2 + rng() * 10 : CHUNK - 2 - rng() * 10); iz2 = oz + rng() * CHUNK; }
+    else { iz2 = oz + (rng() < 0.5 ? 2 + rng() * 10 : CHUNK - 2 - rng() * 10); ix2 = ox + rng() * CHUNK; }
+    addIvyPatch(B, rng, ix2, iz2, 0.8 + rng() * 1.6);
   }
 
   /* ---- glow plants (night bioluminescence) ---- */
@@ -958,6 +1697,16 @@ function buildChunk(ix, iz) {
     const a = rng() * Math.PI * 2, d = 1 + rng() * 2.5;
     addGlowPlant(B, rng, t[0] + Math.cos(a) * d, t[1] + Math.sin(a) * d, 0.25 + rng() * 0.3);
   }
+
+  /* ---- multi-layered canopy (Phase 1): L1 bough roads + L2 weave ---- */
+  addBoughRoads(B, colData, rng, ox, oz, type);
+  addWeave(B, colData, rng, ix, iz, ox, oz, type);
+
+  /* ---- Anomalies (Phase A): the Elevated Line viaduct along rare grid lines ---- */
+  addViaduct(B, colData, mini, rng, ix, iz, ox, oz);
+
+  /* ---- Anomalies (Phase B): Tier 3 oddities sprinkled at low rates ---- */
+  addOddities(B, colData, rng, ix, iz, ox, oz, type);
 
   /* ---- assemble ---- */
   const group = new THREE.Group();
@@ -972,6 +1721,7 @@ function buildChunk(ix, iz) {
     B.lamp.mesh(matLamp, false, true)
   ];
   for (const m of meshes) if (m) group.add(m);
+  for (const m of extraMeshes) group.add(m);
   return { ix, iz, group, colData, mini, openRect, type, name: districtName(ix, iz) };
 }
 
@@ -1447,8 +2197,8 @@ const player = {
   vel: new THREE.Vector3(),
   yaw: Math.atan2(-(SPIRE.x - 2.2), -(SPIRE.z - 2.2)),  // face the spire
   pitch: 0,
-  grounded: false, climbing: false, onCanopy: false,
-  heat: 0, exposed: false,
+  grounded: false, climbing: false, onCanopy: false, supportLayer: null,
+  heat: 0, exposed: false, inPit: false, inWater: false,
   bob: 0, stride: 0
 };
 let lastShade = player.pos.clone();
@@ -1492,7 +2242,7 @@ function showOverlay(paused) {
 
 /* ---- collision helpers ---- */
 function collectColliders(px, pz, out) {
-  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0;
+  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0; out.pits.length = 0; out.waters.length = 0;
   const cx = Math.floor(px / CHUNK), cz = Math.floor(pz / CHUNK);
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     const c = chunks.get(chunkKey(cx + dx, cz + dz));
@@ -1500,9 +2250,11 @@ function collectColliders(px, pz, out) {
     for (const s of c.colData.solids) out.solids.push(s);
     for (const t of c.colData.trunks) out.trunks.push(t);
     for (const p of c.colData.pads) out.pads.push(p);
+    for (const pit of c.colData.pits) out.pits.push(pit);
+    for (const w of c.colData.waters) out.waters.push(w);
   }
 }
-const nearby = { solids: [], trunks: [], pads: [] };
+const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [] };
 
 function stepPlayer(dt) {
   const p = player;
@@ -1518,7 +2270,7 @@ function stepPlayer(dt) {
   if (keys.KeyA || keys.ArrowLeft) { mx -= rx; mz -= rz; }
   const ml = Math.hypot(mx, mz);
   if (ml > 0) { mx /= ml; mz /= ml; }
-  const speed = WALK * ((keys.ShiftLeft || keys.ShiftRight) ? SPRINT : 1);
+  const speed = WALK * ((keys.ShiftLeft || keys.ShiftRight) ? SPRINT : 1) * (p.inWater ? 0.35 : 1);   // wading is slow
   const accel = p.grounded ? 11 : 3;
   p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
   p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
@@ -1579,22 +2331,35 @@ function stepPlayer(dt) {
   }
 
   // --- vertical support ---
-  let support = 0; p.onCanopy = false;
-  let supportIsCanopy = false;
+  // Sinkhole: inside a pit radius the ground drops to the pit floor (below y=0), so the
+  // base support and the hard floor clamp both follow the pit depth instead of 0.
+  let groundY = 0; p.inPit = false;
+  for (const pit of nearby.pits) {
+    const dx = p.pos.x - pit.x, dz = p.pos.z - pit.z;
+    if (dx * dx + dz * dz < pit.r * pit.r) { groundY = Math.min(groundY, -pit.depth); p.inPit = true; }
+  }
+  let support = groundY; p.onCanopy = false;
+  let supportIsCanopy = false, supportLayer = null;
   for (const s of nearby.solids) {
     if (p.pos.x < s.x0 - 0.2 || p.pos.x > s.x1 + 0.2 || p.pos.z < s.z0 - 0.2 || p.pos.z > s.z1 + 0.2) continue;
-    if (feet() >= s.h - 1.0 && feet() <= s.h + 0.6 && s.h > support) { support = s.h; supportIsCanopy = false; }
+    if (feet() >= s.h - 1.0 && feet() <= s.h + 0.6 && s.h > support) { support = s.h; supportIsCanopy = false; supportLayer = null; }
   }
   for (const pad of nearby.pads) {
     const dx = p.pos.x - pad.x, dz = p.pos.z - pad.z;
     if (dx * dx + dz * dz > pad.r * pad.r) continue;
-    if (feet() >= pad.y - 1.3 && feet() <= pad.y + 0.6 && pad.y > support) { support = pad.y; supportIsCanopy = true; }
+    if (feet() >= pad.y - 1.3 && feet() <= pad.y + 0.6 && pad.y > support) { support = pad.y; supportIsCanopy = true; supportLayer = pad.layer || null; }
   }
   p.grounded = false;
   if (p.vel.y <= 0.01 && feet() <= support + 0.02) {
-    p.pos.y = support; p.vel.y = 0; p.grounded = true; p.onCanopy = supportIsCanopy;
+    p.pos.y = support; p.vel.y = 0; p.grounded = true; p.onCanopy = supportIsCanopy; p.supportLayer = supportLayer;
   }
-  if (p.pos.y < 0) { p.pos.y = 0; p.vel.y = 0; p.grounded = true; }
+  if (p.pos.y < groundY) { p.pos.y = groundY; p.vel.y = 0; p.grounded = true; }
+
+  // --- reservoir water: feet inside a water rect and near the surface ---
+  p.inWater = false;
+  for (const w of nearby.waters) {
+    if (p.pos.x > w.x0 && p.pos.x < w.x1 && p.pos.z > w.z0 && p.pos.z < w.z1 && feet() >= w.y - 1 && feet() <= w.y + 0.3) { p.inWater = true; break; }
+  }
 
   // --- head bob & footsteps ---
   const hSpeed = Math.hypot(p.vel.x, p.vel.z);
@@ -1627,10 +2392,18 @@ let shadeTimer = 0;
 function stepHeat(dt) {
   const p = player;
   p.exposed = isExposed();
+  const deepPit = p.inPit && p.pos.y < -1;                   // down in the sinkhole bowl = deep shade
+  if (deepPit) p.exposed = false;
   const airBase = lerp(27, 46, dayF);
-  const air = airBase + (p.exposed ? 11 : 0) - clamp((p.pos.y - 40) * 0.04, 0, 3);
+  let air = airBase + (p.exposed ? 11 : 0) - clamp((p.pos.y - 40) * 0.04, 0, 3);
+  if (deepPit) air -= 6;                                     // cooler at the bottom
   if (p.exposed && dayF > 0.05) p.heat += dayF * dt * 2.6;   // ~40 s to overheat at high noon
-  else p.heat -= dt * 7;
+  else {
+    let drain = 7;                                           // base shade drain
+    if (deepPit) drain = 14;                                 // ~2× in the pit
+    if (p.inWater) drain = 28;                               // ~4× wading in cool water
+    p.heat -= dt * drain;
+  }
   p.heat = clamp(p.heat, 0, 100);
 
   shadeTimer += dt;
@@ -2032,9 +2805,49 @@ function toggleAudio() {
   master.gain.setTargetAtTime(muted ? 0 : 0.35, AC.currentTime, 0.05);
   hint(muted ? 'sound off' : 'sound on', 1.5);
 }
-let nextBird = 0;
+let nextBird = 0, nextChime = 0;
+// Nearest wind-chime pole to the player across the 3×3 chunks around them (or null).
+function nearestChimeDist() {
+  const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+  let best = Infinity;
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const c = chunks.get(chunkKey(cx + dx, cz + dz));
+    if (!c) continue;
+    for (const ch of c.colData.chimes) {
+      const d = Math.hypot(ch.x - player.pos.x, ch.z - player.pos.z);
+      if (d < best) best = d;
+    }
+  }
+  return best === Infinity ? null : best;
+}
+// A gentle randomized pentatonic tinkle, gain scaled by 1/distance. Gated by AC/mute
+// (and never runs in SHOT mode, where AC is never created).
+function sfxChime(dist) {
+  if (!AC || muted) return;
+  const penta = [523.25, 587.33, 698.46, 783.99, 880.0];   // C5 D5 F5 G5 A5
+  const g0 = clamp(1 - dist / 10, 0, 1) * 0.06;
+  const t0 = AC.currentTime + Math.random() * 0.06;
+  const nNotes = 1 + (Math.random() * 3 | 0);
+  for (let k = 0; k < nNotes; k++) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'triangle';
+    const f = penta[(Math.random() * penta.length) | 0] * (Math.random() < 0.5 ? 1 : 2);
+    const ts = t0 + k * (0.09 + Math.random() * 0.13);
+    o.frequency.setValueAtTime(f, ts);
+    g.gain.setValueAtTime(0, ts);
+    g.gain.linearRampToValueAtTime(g0, ts + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, ts + 0.9 + Math.random() * 0.7);
+    o.connect(g); g.connect(master);
+    o.start(ts); o.stop(ts + 1.7);
+  }
+}
 function stepAudio(time) {
   if (!AC || muted) return;
+  if (time > nextChime) {
+    nextChime = time + 2.2 + Math.random() * 3.2;
+    const d = nearestChimeDist();
+    if (d != null && d < 10) sfxChime(d);
+  }
   const wind = 0.035 + clamp(player.pos.y / 70, 0, 1) * 0.1 + dayF * 0.015;
   windGain.gain.setTargetAtTime(wind, AC.currentTime, 0.4);
   const cr = nightF * 0.012;
@@ -2135,10 +2948,13 @@ function loop() {
   skyGroup.position.set(camera.position.x, 0, camera.position.z);
   ground.position.set(Math.round(player.pos.x / 8) * 8, 0, Math.round(player.pos.z / 8) * 8);
 
-  // above the leaves: the horizon opens up and the canopy sea appears
+  // above the leaves: the horizon opens up and the canopy sea appears. The sea ring sits
+  // at y 26.5 — right inside the Weave (24–28) — so it only reveals once the player is
+  // well clear above the Weave, avoiding clipping through the leaf platters.
   const high = smooth(22, 44, player.pos.y);
-  sea.visible = high > 0.02;
-  seaMat.opacity = high;
+  const seaReveal = smooth(31, 40, player.pos.y);
+  sea.visible = seaReveal > 0.02;
+  seaMat.opacity = seaReveal;
   sea.position.set(player.pos.x, 26.5, player.pos.z);
   scene.fog.far = lerp(215, 580, high);
   scene.fog.near = lerp(18, 90, high);
@@ -2155,7 +2971,16 @@ function loop() {
     if (climbTouch && player.pos.y < 3) once('vinehint', () => hint('Hold W while facing the vines to climb · look down + W to descend', 6));
     if (player.climbing) once('climbing', () => msg('The vines hold your weight. Up you go.', 5));
     if (player.pos.y > CANOPY_Y + 2) once('above', () => msg('You break through the canopy — raw sun. Your body heat is climbing.', 7));
-    if (player.onCanopy) once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
+    if (player.onCanopy) {
+      const L = player.supportLayer;
+      if (L === 'bough' && player.pos.y >= 14 && player.pos.y <= 21)
+        once('boughwalk', () => msg('A great bough, worn smooth by generations of feet — the roads run limb to limb, tree to rooftop.', 7));
+      else if (L === 'weave')
+        once('weavewalk', () => msg('The Weave. A raft of woven leaves holds you up; the streets are a green blur far below.', 7));
+      else if (L === 'nest')
+        once('nestwalk', () => msg('A crown nest, alone in the open sky. Someone climbs all the way up here to tend the glow-gardens.', 8));
+      else once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
+    }
     if (nightF > 0.6) once('night', () => { msg('Night. The glow-moss wakes, and the fireflies with it.', 7); hint('The lamps still hum — press F for your flashlight', 6); });
     for (const n of npcs) {
       if (Math.hypot(n.g.position.x - player.pos.x, n.g.position.z - player.pos.z) < 7) {
@@ -2163,6 +2988,17 @@ function loop() {
         break;
       }
     }
+    if (nightF > 0.5 && player.pos.y < 3) {
+      const fc = chunkAt(player.pos.x, player.pos.z);
+      if (fc) for (const fr of fc.colData.ferns) {
+        if (dist2(fr.x, fr.z, player.pos.x, player.pos.z) < fr.r) {
+          once('ferncircle', () => msg('A ring of great ferns, breathing in the dark. Someone planted these in a circle, long ago, and something has kept them.', 8));
+          break;
+        }
+      }
+    }
+    if (player.inWater) once('water', () => msg('You wade into still, cool water — the heat leaches out of you fast.', 6));
+    if (player.inPit && player.pos.y < -1) once('pit', () => msg('Down in the sinkhole the air turns cold and green-lit. The city rim hangs far overhead.', 7));
     if (player.heat > 70) once('hot', () => hint('TOO HOT — get under the leaves or wait for dusk', 5));
     if (!summited && checkSummit(SPIRE.x, SPIRE.z, SPIRE.size / 2, SPIRE.size / 2, SPIRE.h)) {
       summited = true;
@@ -2187,7 +3023,7 @@ function loop() {
     districtEl.textContent = c ? c.name : '—';
     airEl.textContent = Math.round(air);
     altEl.textContent = Math.round(player.pos.y);
-    coverEl.textContent = player.exposed ? 'IN THE SUN' : 'shaded';
+    coverEl.textContent = player.inWater ? 'in water' : player.exposed ? 'IN THE SUN' : (player.inPit && player.pos.y < -1) ? 'deep shade' : 'shaded';
     coverEl.className = player.exposed ? 'exposed' : '';
     tempfillEl.style.width = player.heat.toFixed(0) + '%';
     vignetteEl.style.opacity = smooth(55, 100, player.heat) * 0.9;
