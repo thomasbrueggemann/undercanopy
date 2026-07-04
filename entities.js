@@ -64,7 +64,7 @@ function updateDrifters(time, px, py, pz) {
         const b = blink * blink * nightF;
         D.col[i * 3] = D.base.r * b; D.col[i * 3 + 1] = D.base.g * b; D.col[i * 3 + 2] = D.base.b * b;
       } else {
-        x += Math.sin(time * 0.22 + s0) * 0.012 + 0.006; y -= 0.004 * s1; z += Math.cos(time * 0.18 + s0) * 0.012;
+        x += Math.sin(time * 0.22 + s0) * 0.012 + wpx; y -= 0.004 * s1; z += Math.cos(time * 0.18 + s0) * 0.012 + wpz;
       }
       // wrap into box around player
       const R = D.boxR;
@@ -118,6 +118,12 @@ function makeNPCGroup(kid, role) {
     const staff = new THREE.Mesh(tplCyl, npcWoodMat); staff.scale.set(0.035, 2.0, 0.035); staff.position.set(0.34, 0, 0.06);
     const orb = new THREE.Mesh(tplBlob, npcLanternMat); orb.scale.setScalar(0.13); orb.position.set(0.34, 2.05, 0.06);
     g.add(staff, orb); anim = orb;
+  } else if (role === 'chat' || role === 'vendor') {
+    // a simple pivoting arm so a talker/vendor can raise a hand while gesturing
+    const arm = new THREE.Group();
+    const upper = new THREE.Mesh(tplCyl, cloak.material); upper.scale.set(0.055, 0.46, 0.055); upper.position.y = -0.23;
+    arm.add(upper); arm.position.set(0.2, 1.0, 0.06);
+    g.add(arm); anim = arm;
   } else if (Math.random() < 0.5 && role === 'walk') {
     const basket = new THREE.Mesh(tplBox, npcWoodMat); basket.scale.set(0.36, 0.26, 0.28); basket.position.set(0.34, 0.5, 0);
     g.add(basket);
@@ -154,15 +160,15 @@ function spawnNPC(forceRole) {
       dir: Math.random() < 0.5 ? 1 : -1,
       speed: (role === 'walk' || role === 'lantern') ? (kid ? 2.3 + Math.random() : 1.1 + Math.random() * 0.5) : 0.25,
       phase: Math.random() * 7, turnCd: 2, stateT: 12 + Math.random() * 30,
-      greetCd: 0, faceYaw: Math.random() * 7, partner: null
+      greetCd: 0, faceYaw: Math.random() * 7, partner: null, speaking: true, speakCd: 4 + Math.random() * 5
     };
     npcs.push(npc);
-    if (role === 'chat') { // spawn a partner facing them
+    if (role === 'chat') { // spawn a partner facing them, 0.8 m away
       const { g: g2, anim: a2 } = makeNPCGroup(false, 'chat');
       const a = Math.random() * Math.PI * 2;
-      g2.position.set(x + Math.cos(a) * 0.85, 0, z + Math.sin(a) * 0.85);
+      g2.position.set(x + Math.cos(a) * 0.8, 0, z + Math.sin(a) * 0.8);
       scene.add(g2);
-      const p2 = { g: g2, anim: a2, role: 'chat', axis, line, off, kid: false, dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: npc.stateT, greetCd: 0, faceYaw: 0, partner: npc };
+      const p2 = { g: g2, anim: a2, role: 'chat', axis, line, off, kid: false, dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: npc.stateT, greetCd: 0, faceYaw: 0, partner: npc, speaking: false, speakCd: 1e9 };
       npc.partner = p2; npcs.push(p2);
     }
     return true;
@@ -177,10 +183,67 @@ function removeNPC(npc) {
   if (npc === giver) giver = null;   // a giver culled at range: drop it, redesignate later
 }
 
+// KIDS CHASING: two kid-scaled runners looping a fountain/plaza centre or a lamp post.
+function spawnChaseKids() {
+  nearbyChunks(1, _nc);
+  let cx = null, cz = null, R = 3;
+  for (const c of _nc) if (c.type === 'plaza') { cx = c.ix * CHUNK + 32; cz = c.iz * CHUNK + 32; R = 5.6; break; }
+  if (cx === null) for (const c of _nc) { for (const L of c.colData.lamps) { cx = L.hx; cz = L.hz; R = 2.6; break; } if (cx !== null) break; }
+  if (cx === null) return;
+  const d = Math.hypot(cx - player.pos.x, cz - player.pos.z);
+  if (d < 8 || d > 55) return;
+  const ang0 = Math.random() * Math.PI * 2, dir = Math.random() < 0.5 ? 1 : -1;
+  for (let k = 0; k < 2; k++) {
+    const { g, anim } = makeNPCGroup(true, 'walk');
+    const a = ang0 + k * 1.8;
+    g.position.set(cx + Math.cos(a) * R, 0, cz + Math.sin(a) * R); scene.add(g);
+    npcs.push({ g, anim, role: 'chase', axis: 0, line: 0, off: 0, kid: true,
+      dir, speed: 2.6, phase: Math.random() * 7, turnCd: 2, stateT: 14 + Math.random() * 16,
+      greetCd: 0, faceYaw: 0, partner: null, speaking: false, speakCd: 0,
+      cx, cz, radius: R, ang: a, flipCd: 2 + Math.random() * 3 });
+  }
+}
+
+// VENDOR + CUSTOMER: a stationary vendor behind a stall counter and a customer facing it.
+function spawnVendorStall() {
+  nearbyChunks(1, _nc);
+  for (const c of _nc) for (const s of c.colData.stallAnchors) {
+    const d = Math.hypot(s.x - player.pos.x, s.z - player.pos.z);
+    if (d < 6 || d > 46 || Math.random() > 0.5) continue;
+    const rot = (lx, lz) => [s.x + lx * Math.cos(s.rot) + lz * Math.sin(s.rot), -lx * Math.sin(s.rot) + lz * Math.cos(s.rot) + s.z];
+    const [vx, vz] = rot(0, -0.75);   // behind the counter
+    const [kx, kz] = rot(0, 1.7);     // in front of the counter
+    const { g: gv, anim: av } = makeNPCGroup(false, 'vendor');
+    gv.position.set(vx, 0, vz); scene.add(gv);
+    const vendor = { g: gv, anim: av, role: 'vendor', axis: 0, line: 0, off: 0, kid: false,
+      dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: 1e9,
+      greetCd: 0, faceYaw: Math.atan2(kx - vx, kz - vz), partner: null, speaking: false, speakCd: 2 + Math.random() * 3 };
+    npcs.push(vendor);
+    const { g: gc, anim: ac } = makeNPCGroup(false, 'walk');
+    gc.position.set(kx, 0, kz); scene.add(gc);
+    const cust = { g: gc, anim: ac, role: 'customer', axis: 0, line: 0, off: 0, kid: false,
+      dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: 8 + Math.random() * 12,
+      greetCd: 0, faceYaw: Math.atan2(vx - kx, vz - kz), partner: vendor, speaking: false, speakCd: 0 };
+    vendor.partner = cust; npcs.push(cust);
+    return;
+  }
+}
+
+function countRole(role) { let n = 0; for (const p of npcs) if (p.role === role) n++; return n; }
 function updateNPCs(dt, time) {
   npcLanternMat.emissiveIntensity = matLamp.emissiveIntensity + 0.25;
-  const want = Math.round(lerp(5, 17, dayF));
+  let want = Math.round(lerp(5, 17, dayF));
+  // Density: +40% by day in market/plaza chunks (night crowds unchanged — lantern walkers).
+  const pc = chunkAt(player.pos.x, player.pos.z);
+  const market = !!pc && dayF > 0.35 && (pc.type === 'plaza' || (pc.type === 'city' && pc.colData.stallAnchors && pc.colData.stallAnchors.length > 0));
+  if (market) want = Math.round(want * 1.4);
   if (npcs.length < want && Math.random() < 0.12) spawnNPC();
+  // Vignettes: kids chasing a fountain/lamp; a vendor+customer at a stall. Day only, never in
+  // SHOT (randomness-heavy, could jitter screenshots — mirrors how boars/leapers gate on SHOT).
+  if (!SHOT && dayF > 0.4) {
+    if (Math.random() < 0.014 && countRole('chase') === 0) spawnChaseKids();
+    if (market && Math.random() < 0.02 && countRole('vendor') < 2) spawnVendorStall();
+  }
   let farthest = null, fd = 0;
   for (let i = npcs.length - 1; i >= 0; i--) {
     const n = npcs[i];
@@ -221,15 +284,58 @@ function updateNPCs(dt, time) {
       }
     } else if (n.role === 'chat') {
       if (n.partner) n.faceYaw = Math.atan2(n.partner.g.position.x - n.g.position.x, n.partner.g.position.z - n.g.position.z);
-      n.g.position.y = Math.abs(Math.sin(time * 1.4 + n.phase)) * 0.02;
+      n.g.position.y = Math.abs(Math.sin(time * 1.4 + n.phase)) * 0.02;   // subtle head/torso bob
+      // one lead drives the turn-taking; swap speaker every 4–9 s (partner's speakCd is parked high).
+      n.speakCd -= dt;
+      if (n.speakCd <= 0 && n.partner) { n.speakCd = 4 + Math.random() * 5; n.speaking = !n.speaking; n.partner.speaking = !n.speaking; }
+      if (n.anim) {   // the current speaker raises a hand and gestures
+        const tgt = n.speaking ? -0.9 + Math.sin(time * 4 + n.phase) * 0.32 : 0;
+        n.anim.rotation.x += (tgt - n.anim.rotation.x) * Math.min(1, 6 * dt);
+      }
       n.stateT -= dt;
-      if (n.stateT <= 0) { n.role = 'walk'; n.speed = 1.1 + Math.random() * 0.5; if (n.partner) { n.partner.role = 'walk'; n.partner.speed = 1.3; } }
+      if (n.stateT <= 0) { n.role = 'walk'; n.speed = 1.1 + Math.random() * 0.5; if (n.anim) n.anim.rotation.x = 0; if (n.partner) { n.partner.role = 'walk'; n.partner.speed = 1.3; if (n.partner.anim) n.partner.anim.rotation.x = 0; } }
+    } else if (n.role === 'chase') {
+      // two kids running a loose loop around a centre, with giggling sinusoidal arcs & flips
+      n.flipCd -= dt;
+      if (n.flipCd <= 0) { n.flipCd = 3 + Math.random() * 4; if (Math.random() < 0.5) n.dir *= -1; }
+      n.ang += n.dir * (n.speed / n.radius) * dt;
+      const rr = n.radius + Math.sin(time * 3 + n.phase) * 0.5;
+      const tx = n.cx + Math.cos(n.ang) * rr, tz = n.cz + Math.sin(n.ang) * rr;
+      n.faceYaw = Math.atan2(tx - n.g.position.x, tz - n.g.position.z);
+      n.g.position.x = tx; n.g.position.z = tz; moving = true;
+      n.stateT -= dt;
+      if (n.stateT <= 0) { removeNPC(n); continue; }   // they scatter home after a while
+    } else if (n.role === 'vendor') {
+      if (n.partner) n.faceYaw = Math.atan2(n.partner.g.position.x - n.g.position.x, n.partner.g.position.z - n.g.position.z);
+      n.speakCd -= dt;                                  // occasional gesture toward the customer
+      const gesturing = n.speakCd < 0;
+      if (n.speakCd < -1.3) n.speakCd = 3 + Math.random() * 4;
+      if (n.anim) { const tgt = gesturing ? -0.7 + Math.sin(time * 5 + n.phase) * 0.45 : 0; n.anim.rotation.x += (tgt - n.anim.rotation.x) * Math.min(1, 5 * dt); }
+      n.g.position.y = Math.abs(Math.sin(time * 1.1 + n.phase)) * 0.015;
+      if (!n.partner && n.stateT > 1e8) n.stateT = 6 + Math.random() * 8;   // customer gone (or culled): pack up soon
+      n.stateT -= dt;
+      if (n.stateT <= 0) { removeNPC(n); continue; }
+    } else if (n.role === 'customer') {
+      if (n.partner) n.faceYaw = Math.atan2(n.partner.g.position.x - n.g.position.x, n.partner.g.position.z - n.g.position.z);
+      n.g.position.y = Math.abs(Math.sin(time * 1.2 + n.phase)) * 0.02;
+      n.stateT -= dt;
+      if (n.stateT <= 0) {   // done at the stall — wander off; range-cull despawns it, a new one comes later
+        n.role = 'walk'; n.speed = 1.1 + Math.random() * 0.6;
+        n.axis = Math.random() < 0.5 ? 0 : 1;
+        n.line = 64 * Math.round((n.axis === 0 ? n.g.position.x : n.g.position.z) / 64);
+        n.off = (Math.random() < 0.5 ? -1 : 1) * (5.6 + Math.random() * 1.7);
+        n.dir = Math.random() < 0.5 ? 1 : -1;
+        if (n.partner) { n.partner.partner = null; n.partner.stateT = 6 + Math.random() * 8; }   // vendor packs up soon after
+        n.partner = null;
+      }
     } else if (n.role === 'sweep') {
       const p = n.g.position;
       if (n.axis === 0) p.z += Math.sin(time * 0.35 + n.phase) * 0.15 * dt * 4;
       else p.x += Math.sin(time * 0.35 + n.phase) * 0.15 * dt * 4;
       if (n.anim) n.anim.rotation.y = Math.sin(time * 2.1 + n.phase) * 0.55;
       n.faceYaw += Math.sin(time * 0.2 + n.phase) * 0.002;
+      n.scrapCd = (n.scrapCd || 1) - dt;               // occasional flurry of leaf scraps off the broom
+      if (n.scrapCd <= 0) { n.scrapCd = 1.6 + Math.random() * 2.6; emitScraps(p.x + Math.sin(n.faceYaw) * 0.9, p.z + Math.cos(n.faceYaw) * 0.9); }
     } else if (n.role === 'tend') {
       n.g.scale.y = n.g.scale.x * (0.86 + Math.sin(time * 0.9 + n.phase) * 0.1);
       n.faceYaw += Math.sin(time * 0.15 + n.phase) * 0.003;
@@ -712,5 +818,201 @@ function updateAnimals(dt, time) {
   updateFlock(flockB, dt, time, SHOT ? 0 : dsky, false);
   updateRaptor(dt, time, SHOT ? 0 : dsky);
   updateBats(dt, time, SHOT ? 0 : smooth(0.2, 0.5, nightR));
+}
+
+/* ======================================================================== */
+/*  AMBIENT VIGNETTES — pooled overlays keyed off build-time anchors.        */
+/*  Batched chunk geometry can't move, so motion lives in small pooled       */
+/*  overlays parked at anchor points (the LAMP_POOL idea). Each pool is one   */
+/*  Points draw call (smoke/scraps/lanterns/drips) or a tiny mesh pool        */
+/*  (banners). Queried O(near) per frame, no per-frame allocation.           */
+/* ======================================================================== */
+
+// Pick up to maxN nearest anchors of a colData field within `range` m (reused scratch, no alloc).
+const _pick = [], _pickD = [];
+function pickNearest(field, maxN, range) {
+  _pick.length = 0; _pickD.length = 0;
+  nearbyChunks(2, _nc);
+  const px = player.pos.x, pz = player.pos.z, r2 = range * range;
+  for (const c of _nc) {
+    const arr = c.colData[field]; if (!arr) continue;
+    for (const a of arr) {
+      const dx = a.x - px, dz = a.z - pz, dd = dx * dx + dz * dz;
+      if (dd > r2) continue;
+      if (_pick.length < maxN) { _pick.push(a); _pickD.push(dd); }
+      else { let wi = 0; for (let k = 1; k < maxN; k++) if (_pickD[k] > _pickD[wi]) wi = k;
+        if (dd < _pickD[wi]) { _pick[wi] = a; _pickD[wi] = dd; } }
+    }
+  }
+  return _pick;
+}
+
+/* ---- SMOKE: pooled rising puffs (one Points cloud) at chimneys / fire pits ---- */
+const SMOKE_EMIT = 4, SMOKE_PUFFS = 10, SMOKE_N = SMOKE_EMIT * SMOKE_PUFFS;
+const smokePos = new Float32Array(SMOKE_N * 3), smokeCol = new Float32Array(SMOKE_N * 3);
+const smokeSt = [];
+for (let i = 0; i < SMOKE_N; i++) smokeSt.push({ age: Math.random() * 3, life: 2.6 + Math.random() * 2.4, ox: (Math.random() - 0.5) * 0.3, oz: (Math.random() - 0.5) * 0.3, seed: Math.random() * 7 });
+const smokeGeo = new THREE.BufferGeometry();
+smokeGeo.setAttribute('position', new THREE.BufferAttribute(smokePos, 3));
+smokeGeo.setAttribute('color', new THREE.BufferAttribute(smokeCol, 3));
+const smokeMesh = new THREE.Points(smokeGeo, new THREE.PointsMaterial({ size: 2.6, map: texSoft, vertexColors: true, transparent: true, depthWrite: false, opacity: 0.5 }));
+smokeMesh.frustumCulled = false; scene.add(smokeMesh);
+const _smokeWarm = srgb(0x8f857a), _smokeFog = new THREE.Color();
+function updateSmoke(dt, time) {
+  const emitters = pickNearest('smokes', SMOKE_EMIT, 62), nE = emitters.length;
+  const dusk = Math.exp(-Math.pow(sunElev * 4.4, 2));
+  const vis = clamp(0.5 * dayF + 0.4 * dusk, 0, 0.85);   // by day, brightest at dusk/dawn, gone at deep night
+  smokeMesh.visible = nE > 0 && vis > 0.03;
+  if (!smokeMesh.visible) return;
+  smokeMesh.material.opacity = 0.62 * vis;
+  _smokeFog.copy(scene.fog.color);
+  for (let i = 0; i < SMOKE_N; i++) {
+    const e = i % SMOKE_EMIT, st = smokeSt[i];
+    if (e >= nE) { smokePos[i * 3 + 1] = -80; smokeCol[i * 3] = smokeCol[i * 3 + 1] = smokeCol[i * 3 + 2] = 0; continue; }
+    const A = emitters[e];
+    st.age += dt;
+    if (st.age >= st.life) { st.age = 0; st.life = 2.6 + Math.random() * 2.4; st.ox = (Math.random() - 0.5) * 0.3; st.oz = (Math.random() - 0.5) * 0.3; st.seed = Math.random() * 7; }
+    const k = st.age / st.life, rise = k * st.life * 1.5;
+    smokePos[i * 3] = A.x + st.ox + Math.sin(time * 1.3 + st.seed) * (0.2 + k * 0.5) + wind.dirX * wind.strength * rise * 0.14;
+    smokePos[i * 3 + 1] = A.y + rise;
+    smokePos[i * 3 + 2] = A.z + st.oz + Math.cos(time * 1.1 + st.seed) * (0.2 + k * 0.5) + wind.dirZ * wind.strength * rise * 0.14;
+    smokeCol[i * 3] = _smokeWarm.r * (1 - k) + _smokeFog.r * k;      // dissipate → blend into the sky/fog
+    smokeCol[i * 3 + 1] = _smokeWarm.g * (1 - k) + _smokeFog.g * k;
+    smokeCol[i * 3 + 2] = _smokeWarm.b * (1 - k) + _smokeFog.b * k;
+  }
+  smokeGeo.attributes.position.needsUpdate = true; smokeGeo.attributes.color.needsUpdate = true;
+}
+
+/* ---- LEAF SCRAPS: tiny pooled quads that pop off the sweeper's broom (one Points cloud) ---- */
+const SCRAP_N = 16;
+const scrapPos = new Float32Array(SCRAP_N * 3), scrapCol = new Float32Array(SCRAP_N * 3);
+const scrapSt = [];
+for (let i = 0; i < SCRAP_N; i++) { scrapSt.push({ active: false, age: 0, life: 0, x: 0, y: -80, z: 0, vx: 0, vz: 0 }); scrapPos[i * 3 + 1] = -80; }
+const scrapGeo = new THREE.BufferGeometry();
+scrapGeo.setAttribute('position', new THREE.BufferAttribute(scrapPos, 3));
+scrapGeo.setAttribute('color', new THREE.BufferAttribute(scrapCol, 3));
+const scrapMesh = new THREE.Points(scrapGeo, new THREE.PointsMaterial({ size: 0.34, map: texSoft, vertexColors: true, transparent: true, depthWrite: false, opacity: 0.85 }));
+scrapMesh.frustumCulled = false; scene.add(scrapMesh);
+const _scrapCol = srgb(0x8a7f45);
+let _scrapW = 0;
+function emitScraps(x, z) {
+  const n = 2 + (Math.random() * 2 | 0);
+  for (let k = 0; k < n; k++) {
+    const s = scrapSt[_scrapW++ % SCRAP_N], a = Math.random() * Math.PI * 2, sp = 0.4 + Math.random() * 0.5;
+    s.active = true; s.age = 0; s.life = 0.9 + Math.random() * 0.8; s.x = x; s.y = 0.15; s.z = z; s.vx = Math.cos(a) * sp; s.vz = Math.sin(a) * sp;
+  }
+}
+function updateScraps(dt) {
+  for (let i = 0; i < SCRAP_N; i++) {
+    const s = scrapSt[i];
+    if (!s.active) { scrapPos[i * 3 + 1] = -80; scrapCol[i * 3] = scrapCol[i * 3 + 1] = scrapCol[i * 3 + 2] = 0; continue; }
+    s.age += dt; const k = s.age / s.life;
+    if (k >= 1) { s.active = false; scrapPos[i * 3 + 1] = -80; scrapCol[i * 3] = scrapCol[i * 3 + 1] = scrapCol[i * 3 + 2] = 0; continue; }
+    s.x += s.vx * dt + wind.dirX * wind.strength * 0.01; s.z += s.vz * dt + wind.dirZ * wind.strength * 0.01;
+    s.vx *= 0.9; s.vz *= 0.9; s.y = 0.15 + Math.sin(k * Math.PI) * 0.25;
+    const f = 1 - k;
+    scrapPos[i * 3] = s.x; scrapPos[i * 3 + 1] = s.y; scrapPos[i * 3 + 2] = s.z;
+    scrapCol[i * 3] = _scrapCol.r * f; scrapCol[i * 3 + 1] = _scrapCol.g * f; scrapCol[i * 3 + 2] = _scrapCol.b * f;
+  }
+  scrapGeo.attributes.position.needsUpdate = true; scrapGeo.attributes.color.needsUpdate = true;
+}
+
+/* ---- SWINGING LANTERNS: additive glow sprites that sway at night (one Points cloud) ---- */
+const SWING_N = 10;
+const swingPos = new Float32Array(SWING_N * 3), swingCol = new Float32Array(SWING_N * 3);
+for (let i = 0; i < SWING_N; i++) swingPos[i * 3 + 1] = -80;
+const swingGeo = new THREE.BufferGeometry();
+swingGeo.setAttribute('position', new THREE.BufferAttribute(swingPos, 3));
+swingGeo.setAttribute('color', new THREE.BufferAttribute(swingCol, 3));
+const swingMesh = new THREE.Points(swingGeo, new THREE.PointsMaterial({ size: 0.9, map: texSoft, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.95 }));
+swingMesh.frustumCulled = false; scene.add(swingMesh);
+const _swingCol = srgb(0xffd9a0);
+function updateSwing(dt, time) {
+  const anchors = pickNearest('swingAnchors', SWING_N, 55), nA = anchors.length;
+  swingMesh.visible = nightF > 0.04 && nA > 0;
+  if (!swingMesh.visible) return;
+  for (let i = 0; i < SWING_N; i++) {
+    if (i >= nA) { swingPos[i * 3 + 1] = -80; swingCol[i * 3] = swingCol[i * 3 + 1] = swingCol[i * 3 + 2] = 0; continue; }
+    const A = anchors[i];
+    swingPos[i * 3] = A.x + Math.sin(time * 1.6 + i * 1.3) * 0.1 + wind.dirX * wind.strength * 0.05;   // ±0.1 m sway
+    swingPos[i * 3 + 1] = A.y + Math.sin(time * 2.1 + i) * 0.03;
+    swingPos[i * 3 + 2] = A.z + Math.cos(time * 1.4 + i) * 0.08;
+    const b = nightF * (0.75 + Math.sin(time * 3 + i * 2) * 0.15);   // gentle flicker
+    swingCol[i * 3] = _swingCol.r * b; swingCol[i * 3 + 1] = _swingCol.g * b; swingCol[i * 3 + 2] = _swingCol.b * b;
+  }
+  swingGeo.attributes.position.needsUpdate = true; swingGeo.attributes.color.needsUpdate = true;
+}
+
+/* ---- DRIPS: dew streaks off bridge/viaduct undersides in the morning (one Points cloud) ---- */
+const DRIP_N = 6;
+const dripPos = new Float32Array(DRIP_N * 3), dripCol = new Float32Array(DRIP_N * 3);
+const dripSt = [];
+for (let i = 0; i < DRIP_N; i++) { dripSt.push({ active: false, x: 0, y: -80, z: 0, y0: 0, vy: 0 }); dripPos[i * 3 + 1] = -80; }
+const dripGeo = new THREE.BufferGeometry();
+dripGeo.setAttribute('position', new THREE.BufferAttribute(dripPos, 3));
+dripGeo.setAttribute('color', new THREE.BufferAttribute(dripCol, 3));
+const dripMesh = new THREE.Points(dripGeo, new THREE.PointsMaterial({ size: 0.4, map: texSoft, vertexColors: true, transparent: true, depthWrite: false, opacity: 0.7 }));
+dripMesh.frustumCulled = false; scene.add(dripMesh);
+const _dripCol = srgb(0xbcd6e0);
+function updateDrips(dt) {
+  const anchors = pickNearest('dripAnchors', 8, 45), vis = dewF;
+  dripMesh.visible = vis > 0.05 && anchors.length > 0;
+  for (let i = 0; i < DRIP_N; i++) {
+    const s = dripSt[i];
+    if (!s.active) {
+      dripPos[i * 3 + 1] = -80; dripCol[i * 3] = dripCol[i * 3 + 1] = dripCol[i * 3 + 2] = 0;
+      if (dripMesh.visible && anchors.length && Math.random() < 0.012 * vis) {
+        const A = anchors[(Math.random() * anchors.length) | 0];
+        s.active = true; s.x = A.x + (Math.random() - 0.5) * 1.6; s.z = A.z + (Math.random() - 0.5) * 1.6; s.y = A.y; s.y0 = A.y; s.vy = 0;
+      }
+      continue;
+    }
+    s.vy -= 9.8 * dt; s.y += s.vy * dt;
+    if (s.y < s.y0 - 4.5) { s.active = false; dripPos[i * 3 + 1] = -80; dripCol[i * 3] = dripCol[i * 3 + 1] = dripCol[i * 3 + 2] = 0; continue; }
+    dripPos[i * 3] = s.x; dripPos[i * 3 + 1] = s.y; dripPos[i * 3 + 2] = s.z;
+    const b = vis * 0.85;
+    dripCol[i * 3] = _dripCol.r * b; dripCol[i * 3 + 1] = _dripCol.g * b; dripCol[i * 3 + 2] = _dripCol.b * b;
+  }
+  dripGeo.attributes.position.needsUpdate = true; dripGeo.attributes.color.needsUpdate = true;
+}
+
+/* ---- BANNERS: a small pool of 2-quad cloth banners that flutter with the wind ---- */
+const BANNER_HUES = [0xb5552f, 0x9a7a2f, 0x4e6242].map(srgb);
+function makeBanner() {
+  const g = new THREE.Group(); g.matrixAutoUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({ color: 0xb5552f, roughness: 1, metalness: 0, side: THREE.DoubleSide });
+  const w = 0.55, h = 1.05;
+  const gi = new THREE.PlaneGeometry(w, h); gi.translate(w / 2, -h / 2, 0);
+  g.add(new THREE.Mesh(gi, mat));
+  const outerPivot = new THREE.Group(); outerPivot.position.set(w, 0, 0);
+  const go = new THREE.PlaneGeometry(w, h); go.translate(w / 2, -h / 2, 0);
+  outerPivot.add(new THREE.Mesh(go, mat)); g.add(outerPivot);
+  g.visible = false; scene.add(g);
+  return { g, mat, outerPivot };
+}
+const BANNERS = Array.from({ length: 3 }, makeBanner);
+function updateBanners(dt, time) {
+  const anchors = pickNearest('bannerAnchors', BANNERS.length, 52);
+  for (let i = 0; i < BANNERS.length; i++) {
+    const B = BANNERS[i];
+    if (i >= anchors.length) { B.g.visible = false; continue; }
+    const A = anchors[i];
+    B.g.visible = true;
+    B.g.position.set(A.x, A.y, A.z);
+    B.g.rotation.y = Math.atan2(A.nx, A.nz);
+    B.mat.color.copy(BANNER_HUES[A.hue || 0]);
+    const f = wind.gust;
+    B.outerPivot.rotation.y = 0.3 + Math.sin(time * 2.2 + i) * 0.22 + f * 0.4;   // outer half waves
+    B.g.rotation.z = Math.sin(time * 1.5 + i) * 0.03 + f * 0.05;
+  }
+}
+
+// all pooled ambient vignettes, driven once per frame from the main loop (active only). O(pool).
+function updateVignettes(dt, time) {
+  updateSmoke(dt, time);
+  updateScraps(dt);
+  updateSwing(dt, time);
+  updateDrips(dt);
+  updateBanners(dt, time);
 }
 

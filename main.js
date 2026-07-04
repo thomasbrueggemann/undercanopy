@@ -1040,6 +1040,10 @@ if (SHOT) {
     player.yaw = Math.atan2(HAMLET.x - player.pos.x, HAMLET.z - player.pos.z) + 0.5;
     player.pitch = 0.0; dayT = 0.5;
   }
+  else if (SHOT === '5') {
+    // Life-pass vignette shot: a conversation pair with a smoke plume behind them.
+    dayT = 0.42; player.pos.set(0, 0, 30); player.yaw = Math.PI; player.pitch = 0.03;
+  }
   else {
     dayT = 0.42;
     const spawnAngle = Math.random() * Math.PI * 2;
@@ -1049,7 +1053,7 @@ if (SHOT) {
   }
   ensureChunks(player.pos.x, player.pos.z, true);
   if (SHOT === '4') syncHamletResidents(0.016);   // residents in frame for the hamlet shot
-  if (SHOT !== '2' && SHOT !== '4') { // a few citizens in frame
+  if (SHOT !== '2' && SHOT !== '4' && SHOT !== '5') { // a few citizens in frame
     const spots = [[-6.1, 44, 0.3], [2.5, 52, 2.8], [6.3, 60, -0.4], [-1.5, 68, 1.6], [-6.4, 74, 2.2]];
     for (let k = 0; k < spots.length; k++) {
       const { g } = makeNPCGroup(k === 3, k === 2 ? 'sweep' : 'walk');
@@ -1057,6 +1061,18 @@ if (SHOT) {
       g.rotation.y = spots[k][2];
       scene.add(g);
     }
+  }
+  if (SHOT === '5') {
+    // deterministic face-to-face conversation pair, arms up mid-gesture, ~0.8 m apart
+    const A = makeNPCGroup(false, 'chat'), B = makeNPCGroup(false, 'chat');
+    A.g.position.set(-0.4, 0, 37); A.g.rotation.y = Math.atan2(0.8, 0.6); scene.add(A.g);
+    B.g.position.set(0.4, 0, 37.6); B.g.rotation.y = Math.atan2(-0.8, -0.6); scene.add(B.g);
+    if (A.anim) A.anim.rotation.x = -0.8;   // speaker's raised hand
+    // a couple of onlookers + a smoke plume anchor behind the pair
+    for (const s of [[-4.5, 46, 1.4, false], [4.2, 50, -1.2, true]]) {
+      const { g } = makeNPCGroup(s[3], 'walk'); g.position.set(s[0], 0, s[1]); g.rotation.y = s[2]; scene.add(g);
+    }
+    const c = chunkAt(6, 44); if (c) c.colData.smokes.push({ x: 6, y: 7, z: 44, r: 0.5, warm: false });
   }
 }
 
@@ -1107,6 +1123,7 @@ function loop() {
   if (active) updateNPCs(dt, time);
   if (active) syncHamletResidents(dt);   // Hidden Hamlet residents (spawn near / cull far)
   if (active) updateAnimals(dt, time);   // "The Returned" — ambient wildlife
+  if (active) updateVignettes(dt, time); // Life pass — smoke, scraps, swinging lanterns, drips, banners
 
   let air = 30;
   if (active) air = stepHeat(dt);
@@ -1215,6 +1232,7 @@ function loop() {
       statusEl.textContent = 'READY chunks=' + chunks.size + ' err=' + gl.getError() + ' px=' + px.join(',') +
         ' calls=' + renderer.info.render.calls + ' tris=' + renderer.info.render.triangles + ' lost=' + gl.isContextLost();
       document.title = 'READY';
+      if (shotFrames === 5) console.log('CANOPY_STATUS ' + statusEl.textContent);
     }
   }
 }

@@ -137,7 +137,7 @@ const SKY = {
 };
 const _top = new THREE.Color(), _hor = new THREE.Color(), _sunC = new THREE.Color(), _fogC = new THREE.Color();
 const sunDir = new THREE.Vector3();
-let dayF = 1, nightF = 0, sunElev = 1;
+let dayF = 1, nightF = 0, sunElev = 1, dewF = 0;
 
 function updateSky(t, dt) {
   const ang = (t - 0.25) * Math.PI * 2;
@@ -201,6 +201,7 @@ function updateSky(t, dt) {
   // (~t 0.52); puddle discs are batched per chunk but share matPuddle, so one opacity drive
   // fades them all together (invisible at night and afternoon).
   const dew = smooth(0.19, 0.30, t) * (1 - smooth(0.42, 0.54, t));
+  dewF = dew;   // Life pass: drips under bridges/viaducts read this (entities.js)
   matPuddle.opacity = 0.62 * dew;
 
   // Living water (Feature A): drift the two ripple layers in opposite directions so the
