@@ -968,13 +968,14 @@ function addCrownNest(B, colData, rng, x, y, z, r) {
     B.lamp.addGeo(tplBlob, compose(x, y + 0.85, z, 0.4, 0.4, 0.4), srgb(0xffe0b0), 0, rng);
 }
 
-function addGrassTuft(B, rng, x, z, s) {
+function addGrassTuft(B, rng, x, z, s, y) {
+  y = y || 0;
   const col = rng() < 0.5 ? COL.grassA : COL.grassB;
   const dark = _c.copy(col).multiplyScalar(0.55).clone();
   for (let k = 0; k < 2; k++) {
     const a = rng() * Math.PI + k * Math.PI / 2;
     const dx = Math.cos(a) * s * 0.5, dz = Math.sin(a) * s * 0.5;
-    B.grass.quad([x - dx, 0, z - dz], [x + dx, 0, z + dz], [x + dx, s, z + dz], [x - dx, s, z - dz],
+    B.grass.quad([x - dx, y, z - dz], [x + dx, y, z + dz], [x + dx, y + s, z + dz], [x - dx, y + s, z - dz],
       [0, 0, 1, 1], col, dark);
   }
 }
@@ -1857,16 +1858,116 @@ function addPier(B, colData, rng, axis, cross, u, y) {
     B.vine.quad(a, b, c2, d, [0, 0, 1, vRep], vcol);
   }
 }
+/* ---- Elevated Line: ruined narrow-gauge track on top of each surviving deck ----
+   Ballast strip + weathered sleepers + two rusty rails, all batched. Sleeper
+   layout is seeded off (lineIdx, gi) so it is identical from either chunk that
+   shares a span and stable across reloads. Track is visual only. */
+const TRACK = {
+  gauge: 1.5, sleep: 0.85, railY: 0.30, ballastCol: srgb(0x574d43),
+  steel: srgb(0x4a423b), steelTop: srgb(0x9c948a),
+};
+// map a track-local (along u, across w) point to world [x,y,z]
+function trackXYZ(axis, cross, u, w) { return uvToXZ(axis, cross + w, u); }
+// axis-aligned box in track space: alongLen down u, acrossW down w
+function trackBox(B, axis, cross, uc, w, y, alongLen, h, acrossW, col, jit, rng, ry) {
+  const [x, z] = trackXYZ(axis, cross, uc, w);
+  if (axis === 0) B.plain.addGeo(tplBoxC, compose(x, y, z, acrossW, h, alongLen, 0, ry || 0, 0), col, jit, rng);
+  else B.plain.addGeo(tplBoxC, compose(x, y, z, alongLen, h, acrossW, 0, ry || 0, 0), col, jit, rng);
+}
+// one chained, drooping rail stub jutting `jl` metres past a gap edge, in +/-u dir
+function bentRail(B, axis, cross, uEdge, w, y, dir, jl, segs, col, rng) {
+  let px = uEdge, py = y, drop = 0;
+  for (let k = 0; k < segs; k++) {
+    const t0 = k / segs, t1 = (k + 1) / segs;
+    const u0 = uEdge + dir * jl * t0, u1 = uEdge + dir * jl * t1;
+    const y0 = y - jl * 0.55 * t0 * t0, y1 = y - jl * 0.55 * t1 * t1;   // quadratic droop
+    const [ax, az] = trackXYZ(axis, cross, u0, w), [bx, bz] = trackXYZ(axis, cross, u1, w);
+    B.plain.addGeo(tplCyl, segMat(ax, y0, az, bx, y1, bz, 0.055), col, 0.12, rng);
+  }
+}
+// A ruined derailed carriage lying on its side, half over the deck edge. Visual
+// only — matches the stranded viaduct bus (which registers no collision).
+function addDerailedCarriage(B, rng, axis, cross, uc, y) {
+  const col = _c.copy(COL.rust).lerp(srgb(0x5a7a55), 0.4).multiplyScalar(0.9 + rng() * 0.2).clone();
+  const roof = _c.copy(col).multiplyScalar(1.25).clone();
+  const w = 1.9, roll = 1.15 + rng() * 0.2, wo = 1.9;          // tipped toward the outer edge
+  const bx = cross + wo, cy = y + 0.95;
+  const [x, z] = trackXYZ(axis, cross, uc, wo);
+  if (axis === 0) {
+    B.plain.addGeo(tplBoxC, compose(x, cy, z, 2.1, 2.0, 7, 0, 0, roll), col, 0.08, rng);
+    B.plain.addGeo(tplBoxC, compose(x + Math.sin(roll) * 1.0, cy + Math.cos(roll) * 1.0, z, 0.12, 0.5, 6, 0, 0, roll), roof, 0.06, rng);
+  } else {
+    B.plain.addGeo(tplBoxC, compose(x, cy, z, 7, 2.0, 2.1, roll, 0, 0), col, 0.08, rng);
+    B.plain.addGeo(tplBoxC, compose(x, cy + Math.cos(roll) * 1.0, z + Math.sin(roll) * 1.0, 6, 0.5, 0.12, roll, 0, 0), roof, 0.06, rng);
+  }
+  for (let k = 0; k < 3; k++) {                                  // exposed underside wheels
+    const wu = uc + (k - 1) * 2.1;
+    const [wx, wz] = trackXYZ(axis, cross, wu, wo - Math.cos(roll) * 0.9);
+    B.plain.addGeo(tplWheel, compose(wx, cy + Math.sin(roll) * 0.9 - 0.2, wz, 0.55, 0.55, 0.3, 0, axis === 0 ? Math.PI / 2 : 0, 0), COL.tire, 0.1, rng);
+  }
+}
+// Full track dressing for one surviving span. `nbrPrev/nbrNext` = does the
+// neighbouring span exist (false → gap → maybe bent rails). `carriage` skips
+// sleepers under a derailed carriage to keep the sleeper count sane.
+function addViaductTrack(B, colData, rng, axis, cross, lineIdx, gi, u0, u1, y, nbrPrev, nbrNext, carriage) {
+  const srng = mulberry32(hash2(lineIdx, gi, 6010));
+  const spanLen = u1 - u0, uc = (u0 + u1) / 2, hg = TRACK.gauge / 2;
+  // 1. raised ballast band down the deck centre
+  trackBox(B, axis, cross, uc, 0, y + 0.05, spanLen, 0.10, 3.4, TRACK.ballastCol, 0.22, rng);
+  // 2. weathered sleepers every ~0.85 m (12% gone, 10% skewed), skipped under a carriage
+  const sleeperY = y + 0.18;
+  if (!carriage) {
+    for (let u = u0 + 0.5; u < u1 - 0.3; u += TRACK.sleep) {
+      if (srng() < 0.12) continue;                               // missing crosstie
+      const skew = srng() < 0.10 ? (srng() - 0.5) * 0.5 : 0;
+      const wood = _c.copy(COL.wood).multiplyScalar(0.65 + srng() * 0.6).lerp(COL.rock, srng() * 0.25).clone();
+      trackBox(B, axis, cross, u + (srng() - 0.5) * 0.12, (srng() - 0.5) * 0.1, sleeperY, 0.5, 0.16, 2.4, wood, 0.14, rng, skew);
+    }
+  }
+  // 3. two rails + a bright top strip each
+  for (const w of [-hg, hg]) {
+    trackBox(B, axis, cross, uc, w, y + TRACK.railY, spanLen, 0.14, 0.09, TRACK.steel, 0.1, rng);
+    trackBox(B, axis, cross, uc, w, y + TRACK.railY + 0.085, spanLen, 0.03, 0.05, TRACK.steelTop, 0.06, rng);
+  }
+  // 4. sparse grass poking up between the sleepers, at deck height
+  const nG = srng() < 0.6 ? 1 + (srng() * 2 | 0) : 0;
+  for (let k = 0; k < nG; k++)
+    addGrassTuft(B, srng, ...trackXYZ(axis, cross, u0 + srng() * spanLen, (srng() - 0.5) * 3), 0.35 + srng() * 0.4, y);
+  // 5. bent, drooping rails into an adjacent gap (~60% of gap edges) + dangle debris
+  const gapEdge = (uEdge, dir, nbr, salt) => {
+    if (nbr || hash2(lineIdx, gi, salt) % 100 >= 60) return;
+    const jl = 2 + srng() * 2, segs = 2 + (srng() * 2 | 0);
+    for (const w of [-hg, hg]) bentRail(B, axis, cross, uEdge, w, y + TRACK.railY, dir, jl, segs, TRACK.steel, rng);
+    const nDang = 1 + (srng() * 2 | 0);
+    for (let k = 0; k < nDang; k++) {                            // dangling rotated sleepers
+      const du = jl * (0.3 + srng() * 0.5), wood = _c.copy(COL.wood).multiplyScalar(0.6 + srng() * 0.5).clone();
+      const [dx, dz] = trackXYZ(axis, cross, uEdge + dir * du, (srng() - 0.5) * 1.6);
+      B.plain.addGeo(tplBoxC, compose(dx, y + TRACK.railY - 0.6 - srng() * 1.2, dz, 2.2, 0.15, 0.45, srng(), srng() * 7, srng()), wood, 0.14, rng);
+    }
+    for (let k = 0; k < 2; k++) {                                // thin rebar hanging out of the gap
+      const w = (srng() - 0.5) * 1.4, [ax, az] = trackXYZ(axis, cross, uEdge, w);
+      const [bx, bz] = trackXYZ(axis, cross, uEdge + dir * (0.6 + srng() * 1.6), w + (srng() - 0.5) * 0.6);
+      B.plain.addGeo(tplCyl, segMat(ax, y - 0.2, az, bx, y - 1.4 - srng(), bz, 0.03), COL.rust, 0.1, rng);
+    }
+  };
+  gapEdge(u0, -1, nbrPrev, 6013);
+  gapEdge(u1, 1, nbrNext, 6014);
+}
 function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
   const y = 9, hw = 3, spanLen = 16;
   const lineIdx = axis === 0 ? ix : iz;
   const base0 = axis === 0 ? oz : ox, cross = axis === 0 ? ox : oz;
   const spanBase = (axis === 0 ? iz : ix) * 4;
   const concrete = srgb(0x8a8a82), rail = _c.copy(COL.rock).multiplyScalar(0.9).clone();
+  const lineChunk = axis === 0 ? iz : ix;
+  const spanExists = (g) => (hash2(lineIdx, g, 6003) % 100) < 75;
+  // a derailed carriage on ~1 in 4 line-chunks, on a chosen (existing) span
+  const carChunk = hash2(lineIdx, lineChunk, 6012) % 4 === 0;
+  const carSpan = carChunk ? hash2(lineIdx, lineChunk, 6015) % 4 : -1;
   for (let sp = 0; sp < 4; sp++) {
     const gi = spanBase + sp, u0 = base0 + sp * spanLen, u1 = u0 + spanLen;
     addPier(B, colData, rng, axis, cross, u0, y);
-    const exists = (hash2(lineIdx, gi, 6003) % 100) < 75;
+    const exists = spanExists(gi);
     if (!exists) {                                       // fallen span: debris on the street below
       for (let k = 0; k < 4; k++) {
         const rr = 1 + rng() * 1.4, [dx, dz] = uvToXZ(axis, cross + (rng() - 0.5) * 4, u0 + 2 + rng() * (spanLen - 4));
@@ -1900,6 +2001,21 @@ function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
       if (axis === 0) B.plain.addGeo(tplBoxC, compose(bx, y + 1.2, bz, 2.4, 2.2, 8), bcol, 0.06, rng);
       else B.plain.addGeo(tplBoxC, compose(bx, y + 1.2, bz, 8, 2.2, 2.4), bcol, 0.06, rng);
     }
+    const carriage = sp === carSpan;                     // ruined narrow-gauge track on the deck
+    addViaductTrack(B, colData, rng, axis, cross, lineIdx, gi, u0, u1, y, spanExists(gi - 1), spanExists(gi + 1), carriage);
+    if (carriage) addDerailedCarriage(B, rng, axis, cross, (u0 + u1) / 2, y);
+  }
+  // 1–2 vine curtains hanging from the deck underside for jungliness
+  const crng = mulberry32(hash2(lineIdx, lineChunk, 6017));
+  const nCurt = 1 + hash2(lineIdx, lineChunk, 6016) % 2;
+  for (let k = 0; k < nCurt; k++) {
+    const sp = (crng() * 4) | 0, gi = spanBase + sp;
+    if (!spanExists(gi)) continue;
+    const uc = base0 + sp * spanLen + 3 + crng() * (spanLen - 6), w = (crng() < 0.5 ? -1 : 1) * (hw - 0.2);
+    const [cxp, czp] = uvToXZ(axis, cross + w, uc);
+    const span = 3 + crng() * 3;
+    const [ex, ez] = uvToXZ(axis, cross + w, uc + span);
+    addCurtain(B, crng, cxp, y - 0.6, czp, ex, y - 0.6, ez);
   }
   // access ramp on ~1/3 of chunks along the line: a collapsed slab down to the street beside the deck
   if (hash2(lineIdx, axis === 0 ? iz : ix, 6004) % 3 === 0) {
@@ -2658,6 +2774,11 @@ function makeNPCGroup(kid, role) {
     const stick = new THREE.Mesh(tplCyl, npcWoodMat); stick.scale.set(0.025, 0.8, 0.025); stick.rotation.z = -0.9; stick.position.set(0.25, 0.75, 0.1);
     const glow = new THREE.Mesh(tplBlob, npcLanternMat); glow.scale.setScalar(0.09); glow.position.set(0.62, 0.98, 0.1);
     g.add(stick, glow); anim = glow;
+  } else if (role === 'trialmaster') {
+    // a tall carved staff held upright, topped with a glowing crystal orb — a distinct silhouette
+    const staff = new THREE.Mesh(tplCyl, npcWoodMat); staff.scale.set(0.035, 2.0, 0.035); staff.position.set(0.34, 0, 0.06);
+    const orb = new THREE.Mesh(tplBlob, npcLanternMat); orb.scale.setScalar(0.13); orb.position.set(0.34, 2.05, 0.06);
+    g.add(staff, orb); anim = orb;
   } else if (Math.random() < 0.5 && role === 'walk') {
     const basket = new THREE.Mesh(tplBox, npcWoodMat); basket.scale.set(0.36, 0.26, 0.28); basket.position.set(0.34, 0.5, 0);
     g.add(basket);
@@ -2813,9 +2934,13 @@ const player = {
   pitch: 0,
   grounded: false, climbing: false, onCanopy: false, supportLayer: null,
   heat: 0, exposed: false, inPit: false, inWater: false,
-  bob: 0, stride: 0
+  bob: 0, stride: 0,
+  airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0
 };
 let lastShade = player.pos.clone();
+// Permanent sprint boost, awarded after golding all five Trials (persisted).
+let sprintBoost = false;
+try { sprintBoost = localStorage.getItem('canopy.sprintboost') === '1'; } catch (e) { }
 const keys = {};
 let locked = false, started = false;
 
@@ -2824,8 +2949,12 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM') toggleAudio();
   if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
   if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
-  if (e.code === 'KeyE' && started && giver && !activeMission &&
-      Math.hypot(giver.g.position.x - player.pos.x, giver.g.position.z - player.pos.z) < 3.4) acceptMission(giver.giverArch);
+  if (e.code === 'KeyE' && started) {
+    const tm = (typeof nearestTrialMaster === 'function') ? nearestTrialMaster(3.4) : null;
+    if (tm && !trial) { offerTrial(tm); }
+    else if (giver && !activeMission && !trial &&
+        Math.hypot(giver.g.position.x - player.pos.x, giver.g.position.z - player.pos.z) < 3.4) acceptMission(giver.giverArch);
+  }
 });
 addEventListener('keyup', e => keys[e.code] = false);
 addEventListener('mousemove', e => {
@@ -2873,6 +3002,7 @@ const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [] };
 function stepPlayer(dt) {
   const p = player;
   const feet = () => p.pos.y;
+  const wasGrounded = p.grounded, wasClimbing = p.climbing;
 
   // input direction
   const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
@@ -2884,7 +3014,9 @@ function stepPlayer(dt) {
   if (keys.KeyA || keys.ArrowLeft) { mx -= rx; mz -= rz; }
   const ml = Math.hypot(mx, mz);
   if (ml > 0) { mx /= ml; mz /= ml; }
-  const speed = WALK * ((keys.ShiftLeft || keys.ShiftRight) ? SPRINT : 1) * (p.inWater ? 0.35 : 1);   // wading is slow
+  const sprintF = (keys.ShiftLeft || keys.ShiftRight) ? SPRINT * (sprintBoost ? 1.1 : 1) : 1;   // Trials reward: +10% sprint
+  const speed = WALK * sprintF * (p.inWater ? 0.35 : 1) * (p.stagger > 0 ? 0.45 : 1);   // wading is slow; a hard landing staggers
+  if (p.stagger > 0) p.stagger = Math.max(0, p.stagger - dt);
   const accel = p.grounded ? 11 : 3;
   p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
   p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
@@ -2975,6 +3107,17 @@ function stepPlayer(dt) {
     if (p.pos.x > w.x0 && p.pos.x < w.x1 && p.pos.z > w.z0 && p.pos.z < w.z1 && feet() >= w.y - 1 && feet() <= w.y + 0.3) { p.inWater = true; break; }
   }
 
+  // --- fall damage: track the apex since leaving the ground, resolve the drop on landing ---
+  if (p.grounded || p.climbing) {
+    p.airPeakY = p.pos.y;                       // on the ground / on a vine → no accumulating fall
+  } else {
+    if (p.pos.y > p.airPeakY) p.airPeakY = p.pos.y;
+  }
+  if (p.grounded && !wasGrounded && !wasClimbing) {   // the frame we touch down after being airborne
+    handleLanding(p.airPeakY - p.pos.y);
+    p.airPeakY = p.pos.y;
+  }
+
   // --- head bob & footsteps ---
   const hSpeed = Math.hypot(p.vel.x, p.vel.z);
   if (p.grounded && hSpeed > 0.6) {
@@ -2985,9 +3128,54 @@ function stepPlayer(dt) {
   const bobY = (p.grounded ? Math.sin(p.bob * 2) * 0.042 * Math.min(1, hSpeed / 4) : 0);
 
   camera.position.set(p.pos.x, p.pos.y + EYE + bobY, p.pos.z);
+  if (p.shake > 0) {
+    camera.position.x += (Math.random() - 0.5) * p.shake * 0.4;
+    camera.position.y += (Math.random() - 0.5) * p.shake * 0.4;
+    camera.position.z += (Math.random() - 0.5) * p.shake * 0.4;
+    p.shake = Math.max(0, p.shake - dt * 2.6);
+  }
   camera.rotation.set(p.pitch, p.yaw, 0, 'YXZ');
 
   return climbNormal;
+}
+
+/* ---- fall consequences -----------------------------------------------------
+   Leaf layers (the Weave, crown nests, boughs, tree-canopy pads) and water always
+   catch you. Hard ground / roofs / the viaduct deck / streets hurt: a 7–10 m drop
+   staggers; over 10 m blacks you out — you wake in the last shade, hotter, and any
+   Trial or errand in progress is lost. Normal jumps (a 3 m wall ≈ 4 m drop) are free. */
+const SAFE_LEAF = { weave: 1, nest: 1, bough: 1 };   // + tree-canopy pads (onCanopy, no layer tag)
+function handleLanding(drop) {
+  const p = player;
+  if (drop < 7) return;                                          // ordinary hop — nothing happens
+  const soft = p.inWater || (p.onCanopy && (p.supportLayer === null || SAFE_LEAF[p.supportLayer]));
+  if (soft) {
+    if (p.inWater) msg('You crash down into the water — it swallows the fall.', 4);
+    else { msg('Leaves burst and give — the forest catches you.', 4); p.shake = Math.min(0.5, drop * 0.03); }
+    return;
+  }
+  if (drop <= 10) {                                              // hard but survivable
+    p.stagger = 1.1; p.shake = 0.55;
+    msg('You hit hard and stagger, legs jarred by the landing.', 4);
+    return;
+  }
+  blackout('The ground came up fast. Everything went dark.');   // > 10 m onto something hard
+}
+function blackout(line) {
+  const p = player;
+  if (p.blackout) return;                                        // already fading — don't stack
+  p.blackout = true; p.blackouts++;
+  fadeEl.style.opacity = 1;
+  if (trial) failTrial('fell', 'You fell. The trial is lost.');
+  else if (activeMission) failMission('You fell hard, and the errand with it.');
+  setTimeout(() => {
+    p.pos.copy(lastShade); p.vel.set(0, 0, 0);
+    p.heat = clamp(p.heat + 25, 0, 100);
+    p.airPeakY = p.pos.y; p.grounded = true; p.shake = 0; p.stagger = 0;
+    if (line) msg(line + ' You wake in the shade, aching.', 6);
+    fadeEl.style.opacity = 0;
+    p.blackout = false;
+  }, 850);
 }
 
 /* ======================================================================== */
@@ -3050,6 +3238,7 @@ let giverCd = 4;                  // seconds until the next attempt to find a gi
 const missionEl = document.getElementById('mission');
 const missionTitleEl = document.getElementById('missionTitle');
 const missionProgEl = document.getElementById('missionProg');
+const trialTimerEl = document.getElementById('trialTimer');
 const mmlabelEl = document.getElementById('mmlabel');
 
 const matGiver = new THREE.MeshBasicMaterial({ color: 0xffe27a });
@@ -3194,7 +3383,8 @@ function missionProgText() {
   return '';
 }
 function updateMissionHUD() {
-  if (!activeMission) { missionEl.style.display = 'none'; if (mmlabelEl) mmlabelEl.textContent = '✦ THE SPIRE'; return; }
+  if (typeof trialTimerEl !== 'undefined' && trialTimerEl && !trial) trialTimerEl.style.display = 'none';
+  if (!activeMission) { if (!trial) missionEl.style.display = 'none'; if (mmlabelEl && !trial) mmlabelEl.textContent = '✦ THE SPIRE'; return; }
   missionEl.style.display = 'block';
   missionTitleEl.textContent = activeMission.title;
   missionProgEl.textContent = missionProgText();
@@ -3273,6 +3463,364 @@ function updateMissions(dt, time) {
 }
 
 /* ======================================================================== */
+/*  TRIALS — timed challenges set by trial-masters at plazas & shrines       */
+/*  Separate from the errand system, and mutually exclusive with it: taking  */
+/*  a trial politely drops any errand. Progress persists in localStorage.    */
+/* ======================================================================== */
+const TRIAL = { COURIER: 'courier', TRACK: 'track', ASCENT: 'ascent', SALVAGE: 'salvage', FREEFALL: 'freefall' };
+const TRIAL_ORDER = [TRIAL.COURIER, TRIAL.TRACK, TRIAL.ASCENT, TRIAL.SALVAGE, TRIAL.FREEFALL];
+const TRIAL_NAME = { courier: 'Sun Courier', track: 'Track Runner', ascent: 'The Ascent', salvage: 'Night Salvage', freefall: 'Freefall Faith' };
+const TIERS = ['bronze', 'silver', 'gold'];
+const TIER_MULT = { bronze: 1.35, silver: 1.15, gold: 1.0 };   // timer multipliers — bronze is generous
+const SPRINT_EFF = () => WALK * SPRINT * (sprintBoost ? 1.1 : 1);   // top ground speed, m/s
+
+let trial = null;                                 // the one active trial, or null
+let trialProgress = {};                           // { trialId: bestTierIndex }
+try { trialProgress = JSON.parse(localStorage.getItem('canopy.trials') || '{}') || {}; } catch (e) { trialProgress = {}; }
+function saveTrials() { try { localStorage.setItem('canopy.trials', JSON.stringify(trialProgress)); } catch (e) { } }
+function tierIndexDone(id) { return (id in trialProgress) ? trialProgress[id] : -1; }
+function nextTierIndex(id) { return Math.min(2, tierIndexDone(id) + 1); }   // bronze→silver→gold, then repeat gold
+function trialUnlocked(i) { return i === 0 || tierIndexDone(TRIAL_ORDER[i - 1]) >= 0; }   // ordered gating
+
+// Reusable marker pool (toggled, never re-created), mirroring LAMP_POOL.
+const matTrialMark = new THREE.MeshBasicMaterial({ color: 0x8affd0, fog: false });
+const matRelic = new THREE.MeshBasicMaterial({ color: 0xffdf7a, fog: false });
+const TRIAL_POOL = Array.from({ length: 8 }, () => {
+  const m = new THREE.Mesh(tplBlob, matTrialMark); m.scale.setScalar(0.6); m.visible = false; m.renderOrder = 5; scene.add(m); return m;
+});
+function setMark(i, x, y, z, s, mat) {
+  const m = TRIAL_POOL[i]; if (!m) return;
+  m.position.set(x, y, z); m.scale.setScalar(s || 0.6); m.material = mat || matTrialMark; m.visible = true;
+}
+function hideMarks() { for (const m of TRIAL_POOL) m.visible = false; }
+
+/* ---- trial-master NPCs: deterministic, rare, near plaza fountains & city shrines ---- */
+const trialMasters = new Map();                   // chunkKey → npc
+function trialMasterSpec(ix, iz) {
+  const t = chunkType(ix, iz);
+  if (t === 'plaza' && hash2(ix, iz, 7788) % 2 === 0) return { x: ix * CHUNK + 32, z: iz * CHUNK + 32, seed: hash2(ix, iz, 7790) };
+  if (t === 'city' && hash2(ix, iz, 7789) % 17 === 0) return { x: ix * CHUNK + 32, z: iz * CHUNK + 32, seed: hash2(ix, iz, 7791) };
+  return null;
+}
+function syncTrialMasters() {
+  const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+  const want = new Set();
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+    const ix = cx + dx, iz = cz + dz, key = chunkKey(ix, iz);
+    const spec = trialMasterSpec(ix, iz);
+    if (!spec) continue;
+    want.add(key);
+    if (!trialMasters.has(key)) {
+      const { g, anim } = makeNPCGroup(false, 'trialmaster');
+      g.position.set(spec.x, 0, spec.z);
+      scene.add(g);
+      trialMasters.set(key, { g, anim, spec, faceYaw: 0 });
+    }
+  }
+  for (const [key, tm] of trialMasters) {
+    if (want.has(key)) continue;
+    scene.remove(tm.g); trialMasters.delete(key);
+  }
+}
+function nearestTrialMaster(maxD) {
+  let best = null, bd = maxD || 3.4;
+  for (const tm of trialMasters.values()) {
+    const d = dist2(tm.g.position.x, tm.g.position.z, player.pos.x, player.pos.z);
+    if (d < bd) { bd = d; best = tm; }
+  }
+  return best;
+}
+
+/* ---- world search helpers (pure hashes → no chunk need be loaded) ---- */
+function nearestChunkOfType(type, maxR) {
+  const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+  let best = null, bd = 1e9;
+  for (let r = 0; r <= maxR; r++) for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+    if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+    const ix = cx + dx, iz = cz + dz;
+    if (chunkType(ix, iz) !== type) continue;
+    const d = dx * dx + dz * dz;
+    if (d < bd) { bd = d; best = { ix, iz }; }
+  }
+  return best;
+}
+function nearestViaduct(maxR) {
+  const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+  let best = null, bd = 1e9;
+  for (let d = 0; d <= maxR; d++) {
+    for (const ix of [cx - d, cx + d]) if (hash2(ix, 0, 6001) % 7 === 0) { const dd = Math.abs(ix - cx); if (dd < bd) { bd = dd; best = { axis: 0, cross: ix * CHUNK, lineChunk: ix }; } }
+    for (const iz of [cz - d, cz + d]) if (hash2(0, iz, 6002) % 7 === 0) { const dd = Math.abs(iz - cz); if (dd < bd) { bd = dd; best = { axis: 1, cross: iz * CHUNK, lineChunk: iz }; } }
+  }
+  return best;
+}
+// Read a chunk's colData without keeping it: reuse the live chunk if loaded, else build a
+// throwaway copy and dispose its geometry (deterministic → identical when it loads for real).
+function peekColData(ix, iz) {
+  const c = chunks.get(chunkKey(ix, iz));
+  if (c) return c.colData;
+  const built = buildChunk(ix, iz);
+  built.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+  return built.colData;
+}
+function roofTargetIn(ix, iz) {
+  const cd = peekColData(ix, iz), cxp = ix * CHUNK + 32, czp = iz * CHUNK + 32;
+  let best = null, bd = 1e9;
+  for (const s of cd.solids) {                                    // prefer a vined (climbable) rooftop
+    if (!s.vine || s.h < 8) continue;
+    const x = (s.x0 + s.x1) / 2, z = (s.z0 + s.z1) / 2, d = dist2(x, z, cxp, czp);
+    if (d < bd) { bd = d; best = { x, z, y: s.h }; }
+  }
+  if (best) return best;
+  for (const p of cd.pads) {                                      // else a high tree-canopy pad
+    if ((p.layer && p.layer !== 'bough') || p.y < 12) continue;
+    const d = dist2(p.x, p.z, cxp, czp);
+    if (d < bd) { bd = d; best = { x: p.x, z: p.z, y: p.y }; }
+  }
+  return best || { x: cxp, z: czp, y: 0 };
+}
+function highCanopyStart() {                                      // nearest Weave / crown-nest pad, for Freefall
+  let best = null, bd = 1e9;
+  for (const c of chunks.values()) for (const p of c.colData.pads) {
+    if (p.layer !== 'weave' && p.layer !== 'nest') continue;
+    if (p.y < 24) continue;
+    const d = dist2(p.x, p.z, player.pos.x, player.pos.z);
+    if (d < bd) { bd = d; best = { x: p.x, z: p.z, y: p.y }; }
+  }
+  return best;
+}
+
+/* ---- which trials can start right now? ---- */
+function trialFeasible(id) {
+  if (id === TRIAL.COURIER) return true;                          // a far rooftop can always be computed
+  if (id === TRIAL.TRACK) return !!nearestViaduct(2);
+  if (id === TRIAL.ASCENT) return true;                           // colossus, else the Spire
+  if (id === TRIAL.SALVAGE) return dayF < 0.35 && !!nearestChunkOfType('sinkhole', 8);
+  if (id === TRIAL.FREEFALL) return !!highCanopyStart();
+  return false;
+}
+function offerableTrials() {
+  const out = [];
+  for (let i = 0; i < TRIAL_ORDER.length; i++) {
+    const id = TRIAL_ORDER[i];
+    if (trialUnlocked(i) && trialFeasible(id)) out.push(id);
+  }
+  return out;
+}
+
+/* ---- offer & start ---- */
+function offerTrial(tm) {
+  if (trial) return;
+  const offerable = offerableTrials();
+  const allGold = TRIAL_ORDER.every(id => tierIndexDone(id) >= 2);
+  if (allGold) { msg('The trial-master bows: “You have gold in every trial. There is nothing left I can teach you.”', 7); return; }
+  if (!offerable.length) {
+    // find the first locked-but-real reason to steer the player
+    const next = TRIAL_ORDER.find((id, i) => trialUnlocked(i) && !trialFeasible(id));
+    if (next === TRIAL.SALVAGE) msg('The trial-master eyes the sky: “Night Salvage waits on the dark, and a sinkhole nearby. Come back after dusk.”', 7);
+    else if (next === TRIAL.TRACK) msg('The trial-master shakes their head: “The Track Runner needs a viaduct within reach. Not here.”', 7);
+    else msg('The trial-master studies you: “No trial for you here, just now. Prove yourself where the way is open.”', 6);
+    return;
+  }
+  const prefer = TRIAL_ORDER[tm.spec.seed % TRIAL_ORDER.length];
+  const id = offerable.includes(prefer) ? prefer : offerable[0];
+  startTrial(id, nextTierIndex(id), tm);
+}
+
+function fmtTime(s) { s = Math.max(0, s); const m = Math.floor(s / 60), ss = Math.floor(s % 60); return m + ':' + String(ss).padStart(2, '0'); }
+
+function startTrial(id, tierIdx, tm) {
+  if (activeMission) failMission('“Leave the errand,” the trial-master says. “This is a greater test.”');
+  const tier = TIERS[tierIdx], mult = TIER_MULT[tier];
+  const p = player, T = { id, tierIdx, tier, phase: '', timeLeft: 0, title: TRIAL_NAME[id] + ' · ' + tier.toUpperCase(), obj: '', target: null, cpTime: 0, armed: false, carrying: false };
+  hideMarks();
+  const startMsg = (rule) => msg('TRIAL — ' + TRIAL_NAME[id] + ' (' + tier + '). ' + rule + ' Hold G to abandon.', 9, true);
+
+  if (id === TRIAL.COURIER) {
+    const cx = Math.floor(p.pos.x / CHUNK), cz = Math.floor(p.pos.z / CHUNK);
+    const dir = [[3, 0], [0, 3], [3, 1], [-3, 1], [1, 3], [1, -3], [-3, 0], [0, -3]][tm ? tm.spec.seed % 8 : 0];
+    const ix = cx + dir[0], iz = cz + dir[1];
+    T.target = roofTargetIn(ix, iz);
+    const dist = dist2(p.pos.x, p.pos.z, T.target.x, T.target.z);
+    T.timeLeft = dist / SPRINT_EFF() * mult;
+    T.phase = 'run'; T.obj = 'Deliver the satchel to the marked rooftop';
+    startMsg('Carry the satchel to the far rooftop before the sun-glass runs out — the ground route is too slow; take to the canopy.');
+  } else if (id === TRIAL.TRACK) {
+    const v = nearestViaduct(2);
+    const along0 = v.axis === 0 ? p.pos.z : p.pos.x;
+    const gateAlong = Math.round(along0 / CHUNK) * CHUNK + 8;      // a deck point at a chunk border
+    T.v = v; T.dir = 1; T.gateAlong = gateAlong; T.cpIdx = 0; T.nCp = 3;
+    T.cpTime = 64 / SPRINT_EFF() * 1.7 * mult;                     // per-64 m checkpoint budget (room for jumps)
+    T.phase = 'gate'; T.timeLeft = 999; T.obj = 'Reach the start gate on the deck';
+    startMsg('Reach the deck, then run three spans down the line — hit each checkpoint before its clock empties. Fall off the deck and you fail.');
+  } else if (id === TRIAL.ASCENT) {
+    const col = nearestChunkOfType('colossus', 8);
+    if (col) { const ox = col.ix * CHUNK, oz = col.iz * CHUNK; T.target = { x: ox + 32, z: oz + 32, y: 56.5 }; T.baseY = 2; }
+    else { T.target = { x: SPIRE.x + 6, z: SPIRE.z + 6, y: SPIRE.h + 10 }; T.baseY = 0; }
+    const horiz = dist2(p.pos.x, p.pos.z, T.target.x, T.target.z);
+    T.timeLeft = (T.target.y / 1.05 + horiz / SPRINT_EFF()) * 1.7 * mult;
+    T.phase = 'climb'; T.obj = 'Reach the beacon at the top'; T.cp1 = false; T.cp2 = false;
+    startMsg('Climb to the beacon without ever touching the ground once you have left it. Two rings mark the way up.');
+  } else if (id === TRIAL.SALVAGE) {
+    const sk = nearestChunkOfType('sinkhole', 8);
+    const ox = sk.ix * CHUNK, oz = sk.iz * CHUNK;
+    T.relic = { x: ox + 32, z: oz + 32, y: -4 }; T.home = tm ? { x: tm.g.position.x, z: tm.g.position.z } : { x: p.pos.x, z: p.pos.z };
+    const dist = dist2(p.pos.x, p.pos.z, T.relic.x, T.relic.z);
+    T.timeLeft = (2 * dist) / SPRINT_EFF() * 2.0 * mult;
+    T.phase = 'fetch'; T.obj = 'Recover the relic from the sinkhole floor';
+    startMsg('Bring the relic up from the sinkhole and back to me. It fouls your flashlight — trust the glow-plants on the way back.');
+  } else if (id === TRIAL.FREEFALL) {
+    const s = highCanopyStart();
+    T.start = s; const cx = Math.floor(p.pos.x / CHUNK), cz = Math.floor(p.pos.z / CHUNK);
+    T.ground = { x: cx * CHUNK + 32, z: (cz + 1) * CHUNK + 32, y: 0 };
+    T.timeLeft = 999; T.phase = 'ascend'; T.obj = 'Climb to the high start marker';
+    T.fallTime = s.y * 0.6 * mult;
+    startMsg('Climb to the marker high in the canopy, then drop to the ground marker — fast. Only the leaf layers can catch you; open air onto stone will not.');
+  }
+  trial = T;
+  activeObjective = T.target || (T.relic) || (T.start) || SPIRE;
+  updateTrialHUD();
+}
+
+function endTrialCommon() {
+  hideMarks();
+  if (trial && trial.relicMesh) { trial.relicMesh.visible = false; }
+  trial = null; activeObjective = SPIRE;
+  flashlight.color.setHex(0xfff2d0);
+  updateMissionHUD();
+}
+function failTrial(reason, line) {
+  if (line) msg(line, 7);
+  endTrialCommon();
+}
+function abandonTrial() {
+  msg('You let the trial go. The trial-master only nods — the way stays open.', 5);
+  endTrialCommon();
+}
+function completeTrial() {
+  const T = trial; if (!T) return;
+  const prev = tierIndexDone(T.id);
+  if (T.tierIdx > prev) { trialProgress[T.id] = T.tierIdx; saveTrials(); }
+  sfxTrialDone();
+  msg('TRIAL COMPLETE — ' + TRIAL_NAME[T.id] + ', ' + T.tier + ' earned. The trial-master presses a token into your hand.', 9, true);
+  const allGold = TRIAL_ORDER.every(id => tierIndexDone(id) >= 2);
+  if (allGold && !sprintBoost) {
+    sprintBoost = true; try { localStorage.setItem('canopy.sprintboost', '1'); } catch (e) { }
+    setTimeout(() => msg('The trial-masters have nothing left to teach you. Your legs feel lighter — you run a shade faster now, always.', 10, true), 9500);
+  } else if (allGold) {
+    setTimeout(() => msg('The trial-masters have nothing left to teach you.', 8, true), 9500);
+  }
+  endTrialCommon();
+}
+
+function updateTrialHUD() {
+  if (!trial) { trialTimerEl.style.display = 'none'; return; }
+  missionEl.style.display = 'block';
+  missionTitleEl.textContent = trial.title;
+  missionProgEl.textContent = trial.obj;
+  if (mmlabelEl) mmlabelEl.textContent = '✦ ' + TRIAL_NAME[trial.id].toUpperCase();
+  trialTimerEl.style.display = 'block';
+  const t = trial.timeLeft;
+  trialTimerEl.textContent = (t >= 999 ? '· · ·' : fmtTime(t));
+  trialTimerEl.style.color = t >= 999 ? '#8affd0' : t < 8 ? '#ff5a4a' : t < 20 ? '#ffc061' : '#8affd0';
+}
+
+function updateTrials(dt, time) {
+  syncTrialMasters();
+  // face any nearby master toward the player, gently
+  for (const tm of trialMasters.values()) {
+    const d = dist2(tm.g.position.x, tm.g.position.z, player.pos.x, player.pos.z);
+    if (d < 18) {
+      tm.faceYaw = Math.atan2(player.pos.x - tm.g.position.x, player.pos.z - tm.g.position.z);
+      let dy = tm.faceYaw - tm.g.rotation.y; while (dy > Math.PI) dy -= 2 * Math.PI; while (dy < -Math.PI) dy += 2 * Math.PI;
+      tm.g.rotation.y += dy * Math.min(1, 6 * dt);
+    }
+    if (tm.anim) tm.anim.material.emissiveIntensity = matLamp.emissiveIntensity + 0.4;
+  }
+  if (!trial) {
+    const tm = nearestTrialMaster(3.4);
+    if (tm) hint('Press E — the trial-master offers a trial', 0.4);
+    return;
+  }
+
+  const T = trial, p = player;
+  // shared fail conditions
+  if (T.timeLeft < 999) { T.timeLeft -= dt; if (T.timeLeft <= 0) { failTrial('time', 'The clock beat you. The trial is lost.'); return; } }
+  if (p.heat >= 98 && p.exposed) { failTrial('heat', 'The sun took you mid-trial — you fold and stagger for the shade.'); return; }
+
+  if (T.id === TRIAL.COURIER) {
+    setMark(0, T.target.x, T.target.y + 1.4, T.target.z, 0.8);
+    activeObjective = T.target;
+    if (dist2(p.pos.x, p.pos.z, T.target.x, T.target.z) < 5 && p.pos.y > T.target.y - 2.2) completeTrial();
+  } else if (T.id === TRIAL.TRACK) {
+    const v = T.v, cross = v.cross;
+    const gatePos = v.axis === 0 ? { x: cross, z: T.gateAlong } : { x: T.gateAlong, z: cross };
+    if (T.phase === 'gate') {
+      setMark(0, gatePos.x, 9.6, gatePos.z, 0.9);
+      activeObjective = { x: gatePos.x, z: gatePos.z };
+      if (dist2(p.pos.x, p.pos.z, gatePos.x, gatePos.z) < 3 && p.pos.y > 7) {
+        T.phase = 'run'; T.timeLeft = T.cpTime; T.cpIdx = 0;
+        msg('Go! Hit each checkpoint before its clock runs out.', 4);
+      }
+    } else {
+      if (p.pos.y < 7) { failTrial('fell', 'You went off the deck. The run is over.'); return; }
+      const cpAlong = T.gateAlong + T.dir * 64 * (T.cpIdx + 1);
+      const cp = v.axis === 0 ? { x: cross, z: cpAlong } : { x: cpAlong, z: cross };
+      setMark(0, cp.x, 9.8, cp.z, 0.9);
+      activeObjective = { x: cp.x, z: cp.z };
+      if (dist2(p.pos.x, p.pos.z, cp.x, cp.z) < 3) {
+        T.cpIdx++;
+        if (T.cpIdx >= T.nCp) { completeTrial(); return; }
+        T.timeLeft += T.cpTime;                      // refill for the next span
+        hint('Checkpoint ' + T.cpIdx + ' / ' + T.nCp, 2);
+      }
+    }
+    T.obj = T.phase === 'gate' ? 'Reach the start gate on the deck' : ('Checkpoint ' + (T.cpIdx + 1) + ' / ' + T.nCp);
+  } else if (T.id === TRIAL.ASCENT) {
+    setMark(0, T.target.x, T.target.y + 1.2, T.target.z, 0.9);
+    // checkpoint rings on the way up
+    const h1 = T.baseY + (T.target.y - T.baseY) * 0.33, h2 = T.baseY + (T.target.y - T.baseY) * 0.66;
+    if (!T.cp1) setMark(1, T.target.x, h1, T.target.z, 1.2, matRelic);
+    if (!T.cp2) setMark(2, T.target.x, h2, T.target.z, 1.2, matRelic);
+    activeObjective = T.target;
+    if (p.pos.y > T.baseY + 3) T.armed = true;       // now off the ground
+    if (T.armed && p.grounded && p.supportLayer === null && !p.onCanopy && p.pos.y < 1.5) { failTrial('ground', 'You touched the ground. The Ascent must be unbroken.'); return; }
+    if (!T.cp1 && p.pos.y > h1 - 1.5 && dist2(p.pos.x, p.pos.z, T.target.x, T.target.z) < 12) { T.cp1 = true; TRIAL_POOL[1].visible = false; hint('First ring passed', 2); }
+    if (!T.cp2 && p.pos.y > h2 - 1.5 && dist2(p.pos.x, p.pos.z, T.target.x, T.target.z) < 12) { T.cp2 = true; TRIAL_POOL[2].visible = false; hint('Second ring passed', 2); }
+    if (dist2(p.pos.x, p.pos.z, T.target.x, T.target.z) < 8 && p.pos.y > T.target.y - 3) completeTrial();
+  } else if (T.id === TRIAL.SALVAGE) {
+    if (T.phase === 'fetch') {
+      setMark(0, T.relic.x, T.relic.y + 0.8, T.relic.z, 0.7, matRelic);
+      activeObjective = T.relic;
+      if (dist2(p.pos.x, p.pos.z, T.relic.x, T.relic.z) < 3.2 && p.pos.y < 0) {
+        T.phase = 'return'; T.carrying = true;
+        msg('The relic is cold and heavy. Your flashlight sputters — follow the glow-plants home.', 6);
+      }
+    } else {
+      setMark(0, T.home.x, 1.4, T.home.z, 0.8);
+      activeObjective = T.home;
+      // carrying fouls the flashlight: dim, flickering, off-tint
+      flashlight.color.setHex(0x6a8f7a);
+      flashlight.intensity = Math.max(0, flashlight.intensity * (0.3 + 0.4 * Math.abs(Math.sin(time * 11))));
+      if (dist2(p.pos.x, p.pos.z, T.home.x, T.home.z) < 4) completeTrial();
+    }
+  } else if (T.id === TRIAL.FREEFALL) {
+    if (T.phase === 'ascend') {
+      setMark(0, T.start.x, T.start.y + 1.2, T.start.z, 0.9);
+      activeObjective = T.start;
+      if (dist2(p.pos.x, p.pos.z, T.start.x, T.start.z) < 4 && p.pos.y > T.start.y - 2) {
+        T.phase = 'fall'; T.timeLeft = T.fallTime; T.obj = 'Drop to the ground marker — trust the leaves';
+        msg('Now fall. Let the leaves take you down.', 5);
+      }
+    } else {
+      setMark(0, T.ground.x, 1.4, T.ground.z, 0.9);
+      activeObjective = T.ground;
+      if (dist2(p.pos.x, p.pos.z, T.ground.x, T.ground.z) < 5 && p.pos.y < 4 && p.grounded) completeTrial();
+    }
+  }
+  updateTrialHUD();
+}
+
+/* ======================================================================== */
 /*  MINIMAP                                                                 */
 /* ======================================================================== */
 const mm = document.getElementById('minimap');
@@ -3315,6 +3863,13 @@ function drawMinimap() {
   if (giver && !activeMission) {
     mmx.fillStyle = '#ffe27a';
     mmx.beginPath(); mmx.arc(giver.g.position.x - px, giver.g.position.z - pz, 3, 0, 7); mmx.fill();
+  }
+  // trial-masters nearby (teal diamonds)
+  if (typeof trialMasters !== 'undefined') {
+    mmx.fillStyle = '#8affd0';
+    for (const tm of trialMasters.values()) {
+      mmx.beginPath(); mmx.arc(tm.g.position.x - px, tm.g.position.z - pz, 3, 0, 7); mmx.fill();
+    }
   }
   // objective marker (the current mission target, or the Spire by default)
   const obj = activeObjective || SPIRE;
@@ -3463,6 +4018,23 @@ function sfxChime(dist) {
     o.start(ts); o.stop(ts + 1.7);
   }
 }
+// A rising four-note fanfare on trial completion — AC-gated, same synth idiom as the chime.
+function sfxTrialDone() {
+  if (!AC || muted) return;
+  const notes = [523.25, 659.25, 783.99, 1046.5];   // C5 E5 G5 C6
+  const t0 = AC.currentTime + 0.02;
+  for (let k = 0; k < notes.length; k++) {
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'triangle';
+    const ts = t0 + k * 0.12;
+    o.frequency.setValueAtTime(notes[k], ts);
+    g.gain.setValueAtTime(0, ts);
+    g.gain.linearRampToValueAtTime(0.09, ts + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, ts + 0.5);
+    o.connect(g); g.connect(master);
+    o.start(ts); o.stop(ts + 0.6);
+  }
+}
 function stepAudio(time) {
   if (!AC || muted) return;
   if (time > nextChime) {
@@ -3515,6 +4087,7 @@ let dayT = 0.30;  // 07:12, a long green morning
 let lastT = performance.now();
 let frames = 0, fpsT = 0, hudT = 0, mapT = 0;
 let summited = false;
+let gHold = 0;
 
 // initial world
 ensureChunks(player.pos.x, player.pos.z, true);
@@ -3638,6 +4211,13 @@ function loop() {
       once('spirenear', () => hint('The old broadcast Spire — vines cover every wall. Climb.', 6));
 
     if (!SHOT) updateMissions(dt, time);   // give / advance the current errand (never in screenshot mode)
+    if (!SHOT) updateTrials(dt, time);     // trial-masters, active trial timing & markers
+
+    // abandon a trial by holding G (hint given in the start message) — never soft-locks
+    if (trial) {
+      if (keys.KeyG) { gHold += dt; if (gHold > 0.9) { abandonTrial(); gHold = 0; } }
+      else gHold = 0;
+    } else gHold = 0;
   }
 
   /* --- HUD --- */
