@@ -90,6 +90,32 @@ scene.add(hemi);
 const amb = new THREE.AmbientLight(0x405040, 0.16);
 scene.add(amb);
 
+// Night street lighting: a small pool of real point lights that hop to the nearest
+// still-burning lamp heads around the player, so the dark streets actually pool with
+// warm light instead of only the lamp glass glowing. They read straight from each
+// chunk's colData.lamps (working ones). Kept always-visible with intensity driven to
+// 0 when unused, so the light count — and thus the shaders — never change.
+const LAMP_LIGHTS = 6;
+const LAMP_REACH = 30;
+const lampLights = [];
+for (let i = 0; i < LAMP_LIGHTS; i++) {
+  const L = new THREE.PointLight(0xffb267, 0, LAMP_REACH, 2);
+  L.castShadow = false;
+  scene.add(L);
+  lampLights.push(L);
+}
+
+// The player's flashlight — a spot cone parented to the camera so it always throws
+// where you look. Toggled with F; its intensity ramps on/off smoothly in the loop.
+const flashlight = new THREE.SpotLight(0xfff2d0, 0, 46, 0.46, 0.5, 1.3);
+flashlight.position.set(0.3, -0.22, 0.1);    // held a touch to the right, below the eye
+const flashTarget = new THREE.Object3D();
+flashTarget.position.set(0, -0.14, -1);        // aimed slightly down the street
+camera.add(flashlight);
+camera.add(flashTarget);
+flashlight.target = flashTarget;
+let flashOn = false;
+
 /* ---------------------------------------------------- procedural textures -- */
 function makeCanvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 function canvasTex(c, repeat) {
@@ -396,6 +422,15 @@ function compose(x, y, z, sx, sy, sz, rx, ry, rz) {
   return _m4.compose(_pv, _q, _s);
 }
 
+/* ---- lit-lamp overlays (lamplighter mission) --------------------------------
+   matLamp's emissiveIntensity is driven by the sky every frame (~0 at dusk), so
+   a re-lit lamp needs its own constant glow. A small pool of hidden blobs is
+   parked at lamp heads on demand — batched geometry can't be toggled in place. */
+const matLampLit = new THREE.MeshStandardMaterial({ emissive: srgb(0xffe0b0), emissiveIntensity: 2.4, color: 0x1a1a14, roughness: 0.6, metalness: 0 });
+const LAMP_POOL = Array.from({ length: 8 }, () => {
+  const m = new THREE.Mesh(tplBlob, matLampLit); m.scale.setScalar(0.4); m.visible = false; scene.add(m); return m;
+});
+
 /* ------------------------------------------------------------- palettes -- */
 const COL = {
   bark: srgb(0x5d4a38), barkDark: srgb(0x4a3a2c),
@@ -675,9 +710,11 @@ function addLamp(B, colData, rng, x, z, armAng) {
   const dx = Math.cos(armAng), dz = Math.sin(armAng);
   B.plain.addGeo(tplBox, compose(x + dx * 0.75, 4.42, z + dz * 0.75, 1.6, 0.12, 0.12, 0, -armAng, 0), pole, 0, rng);
   const head = compose(x + dx * 1.45, 4.18, z + dz * 1.45, 0.55, 0.2, 0.32, 0, -armAng, 0);
-  if (rng() < 0.55) B.lamp.addGeo(tplBox, head, srgb(0xfff1cf), 0, rng);
+  const working = rng() < 0.55;                       // rng-neutral: same single draw from the stream
+  if (working) B.lamp.addGeo(tplBox, head, srgb(0xfff1cf), 0, rng);
   else B.plain.addGeo(tplBox, head, COL.wire, 0, rng);
   colData.trunks.push({ x, z, r: 0.14, h: 4.6 });
+  colData.lamps.push({ x, z, working, hx: x + dx * 1.45, hy: 4.18, hz: z + dz * 1.45 });
 }
 
 /* ---- power poles & sagging wires ---- */
@@ -730,7 +767,7 @@ function buildChunk(ix, iz) {
   const type = chunkType(ix, iz);
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch() };
-  const colData = { solids: [], trunks: [], pads: [] };
+  const colData = { solids: [], trunks: [], pads: [], lamps: [] };
   const mini = { rects: [], trees: [], type };
   let openRect = null; // area open to the sky at ground level
 
@@ -979,6 +1016,38 @@ function ensureChunks(px, pz, syncAll) {
   }
 }
 function chunkAt(x, z) { return chunks.get(chunkKey(Math.floor(x / CHUNK), Math.floor(z / CHUNK))); }
+
+// Drive the pool of streetlamp point lights: at night, park each one on one of the
+// nearest still-burning lamp heads around the player and fade it by distance so lamps
+// entering or leaving the pool never pop. During the day every pool light idles at 0.
+const _lampCand = [];
+function updateLampLights() {
+  _lampCand.length = 0;
+  if (nightF > 0.015) {
+    const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      const c = chunks.get(chunkKey(cx + dx, cz + dz));
+      if (!c) continue;
+      for (const L of c.colData.lamps) {
+        if (!L.working) continue;                       // only lamps that still burn
+        const ddx = L.hx - player.pos.x, ddz = L.hz - player.pos.z;
+        _lampCand.push({ L, d2: ddx * ddx + ddz * ddz });
+      }
+    }
+    _lampCand.sort((a, b) => a.d2 - b.d2);
+  }
+  const base = 12 * nightF;
+  for (let i = 0; i < LAMP_LIGHTS; i++) {
+    const light = lampLights[i];
+    if (i < _lampCand.length) {
+      const { L, d2 } = _lampCand[i];
+      light.position.set(L.hx, L.hy - 0.1, L.hz);       // just under the head glass
+      light.intensity = base * (1 - smooth(LAMP_REACH * 0.72, LAMP_REACH, Math.sqrt(d2)));
+    } else {
+      light.intensity = 0;
+    }
+  }
+}
 
 /* ======================================================================== */
 /*  SKY / DAY-NIGHT                                                         */
@@ -1279,6 +1348,7 @@ function removeNPC(npc) {
   scene.remove(npc.g);
   const i = npcs.indexOf(npc); if (i >= 0) npcs.splice(i, 1);
   if (npc.partner) npc.partner.partner = null;
+  if (npc === giver) giver = null;   // a giver culled at range: drop it, redesignate later
 }
 
 function updateNPCs(dt, time) {
@@ -1295,7 +1365,10 @@ function updateNPCs(dt, time) {
     n.turnCd -= dt; n.greetCd -= dt;
 
     let moving = false;
-    if (n.role === 'walk' || n.role === 'lantern') {
+    if (n === giver) {
+      // a mission-giver stands its ground and faces you until you accept or leave
+      n.faceYaw = Math.atan2(player.pos.x - n.g.position.x, player.pos.z - n.g.position.z);
+    } else if (n.role === 'walk' || n.role === 'lantern') {
       // pause & face the player when close
       if (d < 2.6 && n.greetCd <= -2) n.greetCd = 1.6;
       if (n.greetCd > 0) {
@@ -1385,7 +1458,10 @@ let locked = false, started = false;
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyM') toggleAudio();
+  if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
   if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
+  if (e.code === 'KeyE' && started && giver && !activeMission &&
+      Math.hypot(giver.g.position.x - player.pos.x, giver.g.position.z - player.pos.z) < 3.4) acceptMission(giver.giverArch);
 });
 addEventListener('keyup', e => keys[e.code] = false);
 addEventListener('mousemove', e => {
@@ -1574,6 +1650,242 @@ function stepHeat(dt) {
 }
 
 /* ======================================================================== */
+/*  MISSIONS — small errands the under-dwellers ask of you                  */
+/* ======================================================================== */
+const ARCH = { VANTAGE: 'vantage', SUNRUN: 'sun-run', LAMP: 'lamplighter', ERRAND: 'errand' };
+let activeMission = null;         // the one accepted mission, or null
+let activeObjective = SPIRE;      // where the minimap ✦ points (the Spire until a mission overrides)
+let giver = null;                 // an NPC promoted to mission-giver (pre-accept only), or null
+const doneVantages = new Set();   // "rx,rz" of summited peaks — stay pinned on the minimap
+let missionsDone = 0;
+let giverCd = 4;                  // seconds until the next attempt to find a giver
+
+const missionEl = document.getElementById('mission');
+const missionTitleEl = document.getElementById('missionTitle');
+const missionProgEl = document.getElementById('missionProg');
+const mmlabelEl = document.getElementById('mmlabel');
+
+const matGiver = new THREE.MeshBasicMaterial({ color: 0xffe27a });
+const giverMark = new THREE.Mesh(tplBlob, matGiver);
+giverMark.scale.setScalar(0.17); giverMark.visible = false; scene.add(giverMark);
+
+const dist2 = (ax, az, bx, bz) => Math.hypot(ax - bx, az - bz);
+
+/* ---- target finders: scan only loaded chunks, run once at accept ---- */
+function nearestRooftop(minH) {
+  let best = null, bd = 1e9;
+  for (const c of chunks.values()) for (const s of c.colData.solids) {
+    if (!s.vine || s.h < minH) continue;                 // vined → climbable to reach it
+    const x = (s.x0 + s.x1) / 2, z = (s.z0 + s.z1) / 2;
+    const d = dist2(x, z, player.pos.x, player.pos.z);
+    if (d > 20 && d < bd) { bd = d; best = { x, z, y: s.h, halfX: (s.x1 - s.x0) / 2, halfZ: (s.z1 - s.z0) / 2 }; }
+  }
+  return best;
+}
+function nearestGiantTrunk() {
+  let best = null, bd = 1e9;
+  for (const c of chunks.values()) for (const t of c.colData.trunks) {
+    if (t.h <= 20 || t.r < 1.2) continue;                // r-gate: excludes lamps/poles/fountain/mast
+    const d = dist2(t.x, t.z, player.pos.x, player.pos.z);
+    if (d > 14 && d < bd) { bd = d; best = { x: t.x, z: t.z, y: t.h, radius: t.r + 1.4 }; }
+  }
+  return best;
+}
+function nearestOpenRect() {
+  let best = null, bd = 1e9;
+  for (const c of chunks.values()) {
+    if (!c.openRect) continue;
+    const o = c.openRect, x = (o.x0 + o.x1) / 2, z = (o.z0 + o.z1) / 2;
+    const d = dist2(x, z, player.pos.x, player.pos.z);
+    if (d > 12 && d < bd) { bd = d; best = { x, z, y: 0 }; }
+  }
+  return best;
+}
+function brokenLamps(n) {
+  const out = [];
+  for (const c of chunks.values()) for (const L of (c.colData.lamps || []))
+    if (!L.working) out.push({ x: L.x, z: L.z, hx: L.hx, hy: L.hy, hz: L.hz, lit: false, mesh: null });
+  out.sort((a, b) => dist2(a.x, a.z, player.pos.x, player.pos.z) - dist2(b.x, b.z, player.pos.x, player.pos.z));
+  return out.slice(0, n);
+}
+function errandDistrict() {
+  const cx = Math.floor(player.pos.x / CHUNK), cz = Math.floor(player.pos.z / CHUNK);
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1]];
+  const [dx, dz] = dirs[(Math.random() * dirs.length) | 0];
+  const ix = cx + dx * 2, iz = cz + dz * 2;              // ~2 blocks off → a real walk
+  return { x: ix * CHUNK + 32, z: iz * CHUNK + 32, y: 0, name: districtName(ix, iz) };
+}
+
+/* ---- which archetypes can start right now? (never offer an impossible one) ---- */
+const isDusk = () => dayT > 0.72 && dayT < 0.87;
+function pickArch() {
+  const opts = [];
+  if (dayF > 0.4 && (nearestOpenRect() || nearestRooftop(26))) opts.push(ARCH.SUNRUN);
+  if (nearestRooftop(26) || nearestGiantTrunk()) opts.push(ARCH.VANTAGE);
+  if (isDusk() && brokenLamps(3).length >= 3) opts.push(ARCH.LAMP);
+  opts.push(ARCH.ERRAND);                                // always possible
+  return opts[(Math.random() * opts.length) | 0];
+}
+
+function checkSummit(cx, cz, halfX, halfZ, topY) {
+  return Math.abs(player.pos.x - cx) < halfX + 1 && Math.abs(player.pos.z - cz) < halfZ + 1 && player.pos.y > topY - 1.5;
+}
+
+/* ---- accept: build a concrete mission, falling back to an errand if a target
+       has since unloaded so we never hand out something impossible ---- */
+function acceptMission(arch) {
+  const m = { arch, stage: '', target: null, home: null, summit: null, lamps: null, needN: 0, litN: 0, receiver: null, title: '', district: '' };
+  const buildErrand = () => {
+    const d = errandDistrict();
+    m.arch = ARCH.ERRAND; m.target = { x: d.x, z: d.z, y: 0 }; m.district = d.name;
+    m.title = 'Carry the parcel to ' + d.name;
+    msg('A woman folds a parcel in waxcloth: “Take this to my sister in ' + d.name + '. She’ll be watching the road.”', 7);
+  };
+  if (arch === ARCH.VANTAGE) {
+    const roof = nearestRooftop(26), trunk = nearestGiantTrunk();
+    let t = roof, viaTrunk = false;
+    if (trunk && (!roof || dist2(trunk.x, trunk.z, player.pos.x, player.pos.z) < dist2(roof.x, roof.z, player.pos.x, player.pos.z))) { t = trunk; viaTrunk = true; }
+    if (!t) buildErrand();
+    else {
+      m.target = { x: t.x, z: t.z, y: t.y };
+      m.summit = viaTrunk ? { halfX: t.radius, halfZ: t.radius, topY: t.y } : { halfX: t.halfX, halfZ: t.halfZ, topY: t.y };
+      m.title = 'Reach the high roost';
+      msg('An elder points a long finger up: “Climb the tall one yonder, and tell me the green still runs to every edge.”', 7);
+    }
+  } else if (arch === ARCH.SUNRUN) {
+    const t = nearestOpenRect() || nearestRooftop(26);
+    if (!t) buildErrand();
+    else {
+      m.target = { x: t.x, z: t.z, y: t.y }; m.home = lastShade.clone(); m.stage = 'out';
+      m.title = 'Fetch the cache — out in the open';
+      msg('A courier presses a sealed tin at you: “The cache is out in the sun. Grab it and get back under the leaves before you cook.”', 7);
+    }
+  } else if (arch === ARCH.LAMP) {
+    m.lamps = brokenLamps(4 + ((Math.random() * 2) | 0));
+    if (m.lamps.length < 3) buildErrand();
+    else {
+      m.needN = m.lamps.length; m.target = { x: m.lamps[0].x, z: m.lamps[0].z, y: 4.2 };
+      m.title = 'Wake the dark lamps';
+      msg('An out-of-oil lamplighter grips your arm: “Dusk’s nearly gone. Wake the dead lamps down the row before true night.”', 7);
+    }
+  } else {
+    buildErrand();
+  }
+  activeMission = m;
+  activeObjective = m.target;
+  giver = null;
+  updateMissionHUD();
+}
+
+function clearMissionMeshes() {
+  for (const mm of LAMP_POOL) mm.visible = false;
+  if (activeMission && activeMission.receiver) { scene.remove(activeMission.receiver); activeMission.receiver = null; }
+}
+function completeMission(goldLine) {
+  if (goldLine) msg(goldLine, 9, true);
+  missionsDone++;
+  clearMissionMeshes();
+  activeMission = null; activeObjective = SPIRE;
+  giverCd = 6 + Math.random() * 6;
+  updateMissionHUD();
+}
+function failMission(line) {
+  if (line) msg(line, 7);
+  clearMissionMeshes();
+  activeMission = null; activeObjective = SPIRE;
+  giverCd = 8 + Math.random() * 6;
+  updateMissionHUD();
+}
+
+function missionProgText() {
+  const m = activeMission;
+  if (!m) return '';
+  if (m.arch === ARCH.LAMP) return 'Lamps woken ' + m.litN + ' / ' + m.needN;
+  if (m.arch === ARCH.SUNRUN) return m.stage === 'out' ? 'Reach the cache' : 'Get back to shade';
+  if (m.arch === ARCH.VANTAGE) return 'Climb to the top';
+  if (m.arch === ARCH.ERRAND) return 'Deliver in ' + m.district;
+  return '';
+}
+function updateMissionHUD() {
+  if (!activeMission) { missionEl.style.display = 'none'; if (mmlabelEl) mmlabelEl.textContent = '✦ THE SPIRE'; return; }
+  missionEl.style.display = 'block';
+  missionTitleEl.textContent = activeMission.title;
+  missionProgEl.textContent = missionProgText();
+  if (mmlabelEl) mmlabelEl.textContent = '✦ ' + activeMission.title.toUpperCase();
+}
+
+function updateMissions(dt, time) {
+  // ---- no active mission: find & mark a giver, offer to accept ----
+  if (!activeMission) {
+    if (giver && dist2(giver.g.position.x, giver.g.position.z, player.pos.x, player.pos.z) > 34) giver = null;
+    giverCd -= dt;
+    if (!giver && giverCd <= 0) {
+      giverCd = 2.5;
+      let best = null, bd = 30;
+      for (const n of npcs) {
+        if (n.role !== 'walk' && n.role !== 'tend') continue;
+        const d = dist2(n.g.position.x, n.g.position.z, player.pos.x, player.pos.z);
+        if (d < bd) { bd = d; best = n; }
+      }
+      if (best) { best.giverArch = pickArch(); giver = best; }
+    }
+    if (giver) {
+      giverMark.position.set(giver.g.position.x, giver.g.position.y + 2.25 + Math.sin(time * 3) * 0.06, giver.g.position.z);
+      giverMark.visible = true;
+      if (dist2(giver.g.position.x, giver.g.position.z, player.pos.x, player.pos.z) < 3.2) hint('Press E — hear them out', 0.4);
+    } else giverMark.visible = false;
+    return;
+  }
+  giverMark.visible = false;
+
+  const m = activeMission, p = player;
+  if (m.arch === ARCH.VANTAGE) {
+    if (checkSummit(m.target.x, m.target.z, m.summit.halfX, m.summit.halfZ, m.summit.topY)) {
+      doneVantages.add(Math.round(m.target.x) + ',' + Math.round(m.target.z));
+      completeMission('The roost. Wind, and the leaf-sea rolling to every horizon. You breathe it in, then start down.');
+    }
+  } else if (m.arch === ARCH.SUNRUN) {
+    if (p.heat >= 98 && p.exposed) { failMission('The sun won this round — you drop the tin and stagger for the shade.'); return; }
+    if (m.stage === 'out') {
+      const reached = dist2(p.pos.x, p.pos.z, m.target.x, m.target.z) < 5 && (m.target.y < 1 ? p.exposed : p.pos.y > m.target.y - 2);
+      if (reached) {
+        m.stage = 'back'; activeObjective = m.home;
+        msg('Cache in hand. Now RUN — the shade is back the way you came.', 6);
+        updateMissionHUD();
+      }
+    } else if (!p.exposed && p.grounded && p.pos.y < CANOPY_Y) {
+      completeMission('Back under the leaves, lungs burning, tin still cool. That was close.');
+    }
+  } else if (m.arch === ARCH.LAMP) {
+    if (nightF > 0.55) { failMission('True night falls with lamps still dark. The lamplighter sighs and takes back the taper.'); return; }
+    let nextUnlit = null, nd = 1e9;
+    for (const L of m.lamps) {
+      if (L.lit) continue;
+      if (dist2(L.x, L.z, p.pos.x, p.pos.z) < 3.2) {
+        const slot = LAMP_POOL.find(mm => !mm.visible);
+        if (slot) { slot.position.set(L.hx, L.hy, L.hz); slot.visible = true; L.mesh = slot; }
+        L.lit = true; m.litN++;
+        hint('A lamp wakes — ' + m.litN + ' / ' + m.needN, 2.5);
+        updateMissionHUD();
+        continue;
+      }
+      const d = dist2(L.x, L.z, p.pos.x, p.pos.z);
+      if (d < nd) { nd = d; nextUnlit = L; }
+    }
+    if (m.litN >= m.needN) { completeMission('Every lamp along the row is burning. The street glows amber, and folk nod as they pass.'); return; }
+    if (nextUnlit) activeObjective = { x: nextUnlit.x, z: nextUnlit.z, y: 4.2 };
+  } else if (m.arch === ARCH.ERRAND) {
+    const d = dist2(p.pos.x, p.pos.z, m.target.x, m.target.z);
+    if (!m.receiver && d < 55) {
+      const r = makeNPCGroup(false, 'tend').g;
+      r.position.set(m.target.x, 0, m.target.z); scene.add(r); m.receiver = r;
+    }
+    if (m.receiver) m.receiver.rotation.y = Math.atan2(p.pos.x - m.target.x, p.pos.z - m.target.z);
+    if (d < 4 && m.receiver) completeMission('Delivered. Her sister folds a sprig of glow-moss into your palm — “safe roads, wanderer.”');
+  }
+}
+
+/* ======================================================================== */
 /*  MINIMAP                                                                 */
 /* ======================================================================== */
 const mm = document.getElementById('minimap');
@@ -1606,8 +1918,20 @@ function drawMinimap() {
       mmx.beginPath(); mmx.arc(t[0] - px, t[1] - pz, t[2] * 0.6, 0, 7); mmx.fill();
     }
   }
-  // spire marker
-  const sdx = SPIRE.x - px, sdz = SPIRE.z - pz;
+  // summited vantages — faint pins that persist
+  mmx.fillStyle = 'rgba(180,210,120,0.55)';
+  for (const k of doneVantages) {
+    const ci = k.indexOf(','), vx = +k.slice(0, ci), vz = +k.slice(ci + 1);
+    if (Math.abs(vx - px) < 180 && Math.abs(vz - pz) < 180) { mmx.beginPath(); mmx.arc(vx - px, vz - pz, 2.6, 0, 7); mmx.fill(); }
+  }
+  // an available mission-giver, before you accept
+  if (giver && !activeMission) {
+    mmx.fillStyle = '#ffe27a';
+    mmx.beginPath(); mmx.arc(giver.g.position.x - px, giver.g.position.z - pz, 3, 0, 7); mmx.fill();
+  }
+  // objective marker (the current mission target, or the Spire by default)
+  const obj = activeObjective || SPIRE;
+  const sdx = obj.x - px, sdz = obj.z - pz;
   const sd = Math.hypot(sdx, sdz);
   mmx.fillStyle = '#ffd85e';
   if (sd * MM_SCALE < MM_S / 2 - 10) {
@@ -1803,6 +2127,10 @@ function loop() {
   sun.target.position.set(sx, 0, sz);
   sun.target.updateMatrixWorld();
   updateSky(dayT);
+  updateLampLights();
+
+  // flashlight ramps smoothly toward on/off when toggled
+  flashlight.intensity += ((flashOn ? 4.5 : 0) - flashlight.intensity) * Math.min(1, 9 * dt);
 
   skyGroup.position.set(camera.position.x, 0, camera.position.z);
   ground.position.set(Math.round(player.pos.x / 8) * 8, 0, Math.round(player.pos.z / 8) * 8);
@@ -1828,7 +2156,7 @@ function loop() {
     if (player.climbing) once('climbing', () => msg('The vines hold your weight. Up you go.', 5));
     if (player.pos.y > CANOPY_Y + 2) once('above', () => msg('You break through the canopy — raw sun. Your body heat is climbing.', 7));
     if (player.onCanopy) once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
-    if (nightF > 0.6) once('night', () => msg('Night. The glow-moss wakes, and the fireflies with it.', 7));
+    if (nightF > 0.6) once('night', () => { msg('Night. The glow-moss wakes, and the fireflies with it.', 7); hint('The lamps still hum — press F for your flashlight', 6); });
     for (const n of npcs) {
       if (Math.hypot(n.g.position.x - player.pos.x, n.g.position.z - player.pos.z) < 7) {
         once('people', () => msg('The under-dwellers nod as you pass. Life goes on, just… lower.', 7));
@@ -1836,13 +2164,17 @@ function loop() {
       }
     }
     if (player.heat > 70) once('hot', () => hint('TOO HOT — get under the leaves or wait for dusk', 5));
-    if (!summited && Math.abs(player.pos.x - SPIRE.x) < SPIRE.size / 2 + 1 && Math.abs(player.pos.z - SPIRE.z) < SPIRE.size / 2 + 1 && player.pos.y > SPIRE.h - 1) {
+    if (!summited && checkSummit(SPIRE.x, SPIRE.z, SPIRE.size / 2, SPIRE.size / 2, SPIRE.h)) {
       summited = true;
+      doneVantages.add(Math.round(SPIRE.x) + ',' + Math.round(SPIRE.z));
       msg('The Spire. From here the green goes to every horizon — the city is a forest, and the forest is the world now.', 10, true);
       setTimeout(() => msg('Outside the canopy it is 54 °C. There is nowhere to escape to. Head back down — home is under the leaves.', 9, true), 10500);
+      if (activeMission && activeMission.arch === ARCH.VANTAGE && Math.round(activeMission.target.x) === Math.round(SPIRE.x)) completeMission();
     }
     if (!seen.spirenear && Math.hypot(player.pos.x - SPIRE.x, player.pos.z - SPIRE.z) < 26 && player.pos.y < 4)
       once('spirenear', () => hint('The old broadcast Spire — vines cover every wall. Climb.', 6));
+
+    if (!SHOT) updateMissions(dt, time);   // give / advance the current errand (never in screenshot mode)
   }
 
   /* --- HUD --- */

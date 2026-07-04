@@ -29,6 +29,8 @@ python3 -m http.server 8080   # then open http://localhost:8080
 | Space | jump (or kick off a wall while climbing) |
 | **W while facing vines** | climb — look up to ascend, down to descend |
 | T (hold) | fast-forward time |
+| **E** | talk to a citizen who hails you / take the errand they offer |
+| F | flashlight on/off |
 | M | sound on/off |
 | R | return to your last shaded spot |
 | Esc | pause |
@@ -47,10 +49,19 @@ python3 -m http.server 8080   # then open http://localhost:8080
   canopy (or in open plazas at noon) your body heat climbs. Overheat and you wake up back
   in the shade.
 - **The Spire** — follow the ✦ marker on the minimap to the old broadcast tower and climb
-  above the canopy for the reveal.
+  above the canopy for the reveal. It's also the first of your **vantages**.
+- **Errands** — the under-dwellers hail you as you pass; a gold ✦ floats over anyone with
+  something to ask. Press **E** to take the job, and the ✦ retargets to it:
+  - **Vantages** — climb a tall rooftop or a giant trunk and summit it; the peaks you've
+    topped stay pinned on the minimap.
+  - **Sun-runs** — sprint out to a cache in the open and back under the leaves before your
+    body heat fills the bar. The heat gauge *is* the timer.
+  - **Lamplighter** — at dusk, wake the dead street-lamps down a row before true night.
+  - **Deliveries** — carry a parcel to someone in a neighbouring named district.
 - **Day & night** — dawn glow, blazing noon, fireflies, bioluminescent glow-moss, lit
-  windows, stars, drifting clouds. All audio (wind, birds, crickets, footsteps) is
-  synthesized live with WebAudio.
+  windows, stars, drifting clouds. After dark the working street lamps throw real pools
+  of warm light, and you carry a **flashlight** (F) that lights wherever you look. All
+  audio (wind, birds, crickets, footsteps) is synthesized live with WebAudio.
 
 ## Tech notes
 
