@@ -1,5 +1,5 @@
 /* ============================================================================
-   UNDERCANOPY — a first-person walk through an endless, overgrown city.
+   CANOPY — a first-person walk through an endless, overgrown city.
    Single-file game logic on top of three.js (r152 UMD).
    Everything is procedural: geometry, textures, city layout, sound.
    ========================================================================= */
@@ -1194,7 +1194,7 @@ function updateDrifters(time, px, py, pz) {
 }
 
 /* ======================================================================== */
-/*  PEOPLE — cloaked citizens of the undercanopy                            */
+/*  PEOPLE — cloaked citizens of the canopy                            */
 /* ======================================================================== */
 const npcGeoCloak = new THREE.CylinderGeometry(0.17, 0.37, 1.16, 7); npcGeoCloak.translate(0, 0.58, 0);
 const npcGeoHood = new THREE.SphereGeometry(0.23, 8, 6); npcGeoHood.scale(1, 0.78, 1);

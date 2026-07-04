@@ -1,4 +1,4 @@
-# UNDERCANOPY — the overgrown city
+# CANOPY — the overgrown city
 
 A first-person exploration game in a single HTML file + one script, built on **three.js** (r152).
 
@@ -14,7 +14,7 @@ no network needed). Chrome/Edge/Safari, a laptop from the last few years is plen
 If your browser is strict about `file://` pages:
 
 ```sh
-cd undercanopy
+cd canopy
 python3 -m http.server 8080   # then open http://localhost:8080
 ```
 
