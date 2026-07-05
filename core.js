@@ -70,7 +70,12 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x88a37c, 18, 215);
-const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.1, 1200);
+// near/far ratio drives depth-buffer precision. The old 0.1/1200 (12000:1) starved
+// city-distance facades of resolution, so flush ornaments (signs at 0.08 m, vines at
+// 0.14 m) z-fought the wall behind them and flickered on every camera turn. Player
+// collision keeps the first-person eye >= PR (0.42 m) off any wall, so a 0.3 m near
+// clips nothing; far drops to 700 (well past the 580 m high-altitude fog cutoff).
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.3, 700);
 scene.add(camera);
 
 addEventListener('resize', () => {

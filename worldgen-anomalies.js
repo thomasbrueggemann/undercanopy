@@ -1033,6 +1033,16 @@ function buildChunk(ix, iz) {
   if (type === 'city') {
     // continuous rows of buildings around the block perimeter → street canyons
     const L = CHUNK - 2 * INSET;
+    // Sides 0/1 run along x, sides 2/3 along z; every row starts at the same INSET line,
+    // so at each corner a side-0/1 building and a side-2/3 building both put a street
+    // facade on the exact same plane (x=INSET or z=INSET). Coincident coplanar walls
+    // z-fight and flicker on every camera turn. Sides 0/1 are placed first and already
+    // span the corners, so we skip any later building whose footprint overlaps one
+    // already placed — corners stay covered, but no wall is ever drawn twice.
+    const placed = [];
+    const clashes = (bx, bz, bw, bd) => placed.some(p =>
+      bx - bw / 2 < p.x1 - 0.5 && bx + bw / 2 > p.x0 + 0.5 &&
+      bz - bd / 2 < p.z1 - 0.5 && bz + bd / 2 > p.z0 + 0.5);
     for (const side of [0, 1, 2, 3]) {
       let t = 0;
       while (t < L - 5) {
@@ -1051,6 +1061,8 @@ function buildChunk(ix, iz) {
           else if (side === 1) { bx = ox + center; bz = oz + CHUNK - INSET - depth / 2; bw = along; bd = depth; }
           else if (side === 2) { bx = ox + INSET + depth / 2; bz = oz + center; bw = depth; bd = along; }
           else { bx = ox + CHUNK - INSET - depth / 2; bz = oz + center; bw = depth; bd = along; }
+          if (clashes(bx, bz, bw, bd)) { t += w2; continue; }   // corner already built by a perpendicular row
+          placed.push({ x0: bx - bw / 2, z0: bz - bd / 2, x1: bx + bw / 2, z1: bz + bd / 2 });
           addBuilding(B, colData, mini, rng, bx, bz, bw, bd, h);
           // garden yards: dress the gap beside the house with fence / shed / laundry
           if (style === 'garden' && gap > 2 && t + along + gap < L) {
