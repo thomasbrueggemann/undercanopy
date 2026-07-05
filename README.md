@@ -6,6 +6,8 @@ A first-person exploration game in a single HTML file + one script, built on **t
 cities, and now people live in the cool green street-canyons beneath the leaves. Above the
 canopy the sun burns at 54 °C — you can climb out any time you like, you just can't stay.
 
+## **[▶ PLAY HERE](https://thomasbrueggemann.github.io/canopy/)**
+
 ## Run it
 
 Just open `index.html` in a browser (double-click works — everything is local and procedural,
