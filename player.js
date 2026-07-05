@@ -27,10 +27,15 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
   if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
   if (e.code === 'KeyE' && started) {
-    const tm = (typeof nearestTrialMaster === 'function') ? nearestTrialMaster(3.4) : null;
-    if (tm && !trial) { offerTrial(tm); }
-    else if (giver && !activeMission && !trial &&
-        Math.hypot(giver.g.position.x - player.pos.x, giver.g.position.z - player.pos.z) < 3.4) acceptMission(giver.giverArch);
+    // Story first (Part 2): the Archivist / campaign interactions are rare & positional, so they
+    // win ties over the trial-master and errand giver. storyInteract() returns true if it consumed E.
+    if (typeof storyInteract === 'function' && storyInteract()) { /* consumed by the campaign */ }
+    else {
+      const tm = (typeof nearestTrialMaster === 'function') ? nearestTrialMaster(3.4) : null;
+      if (tm && !trial) { offerTrial(tm); }
+      else if (giver && !activeMission && !trial &&
+          Math.hypot(giver.g.position.x - player.pos.x, giver.g.position.z - player.pos.z) < 3.4) acceptMission(giver.giverArch);
+    }
   }
 });
 addEventListener('keyup', e => keys[e.code] = false);
@@ -91,7 +96,9 @@ function stepPlayer(dt) {
   if (keys.KeyA || keys.ArrowLeft) { mx -= rx; mz -= rz; }
   const ml = Math.hypot(mx, mz);
   if (ml > 0) { mx /= ml; mz /= ml; }
-  const sprintF = (keys.ShiftLeft || keys.ShiftRight) ? SPRINT * (sprintBoost ? 1.1 : 1) : 1;   // Trials reward: +10% sprint
+  // Trials reward: +10% sprint. Second Seed (Part 2, Ch6/7): sprint disabled while carrying the Seed.
+  const carrying = typeof storyCarrying !== 'undefined' && storyCarrying;
+  const sprintF = ((keys.ShiftLeft || keys.ShiftRight) && !carrying) ? SPRINT * (sprintBoost ? 1.1 : 1) : 1;
   const speed = WALK * sprintF * (p.inWater ? 0.35 : 1) * (p.stagger > 0 ? 0.45 : 1);   // wading is slow; a hard landing staggers
   if (p.stagger > 0) p.stagger = Math.max(0, p.stagger - dt);
   const accel = p.grounded ? 11 : 3;

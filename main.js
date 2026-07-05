@@ -554,6 +554,14 @@ function startTrial(id, tierIdx, tm) {
     T.fallTime = s.y * 0.6 * mult;
     startMsg('Climb to the marker high in the canopy, then drop to the ground marker — fast. Only the leaf layers can catch you; open air onto stone will not.');
   } else if (id === TRIAL.RUMOR) {
+    // Second Seed interplay (Part 2, Ch5): if the campaign already discovered the hamlet by
+    // walking this very rumor, don't make the player re-run it — record the tier and nod.
+    if (typeof STORY_SAVE !== 'undefined' && STORY_SAVE.foundHamletViaStory && hamletFound) {
+      if (tierIdx > tierIndexDone(id)) { trialProgress[id] = tierIdx; saveTrials(); }
+      if (!hamletErrand) { hamletErrand = true; try { localStorage.setItem('canopy.hamletErrand', '1'); } catch (e) { } }
+      msg('The trial-master studies you and nods slowly: “…you have already followed that rumor to its end. The hamlet knows your face now.”', 8, true);
+      return;
+    }
     // Untimed. Three sequential clues; markers appear only for the already-given clue,
     // and never for the final hamlet clue — the words must be enough.
     T.timeLeft = 999; T.phase = 'clue1';
@@ -761,10 +769,13 @@ function drawMinimap() {
   // world→screen: rotate so facing = up
   mmx.setTransform(MM_SCALE * cy, MM_SCALE * sy, -MM_SCALE * sy, MM_SCALE * cy, MM_S / 2, MM_S / 2);
   const bgFor = { city: '#1a2114', towers: '#1c1f18', park: '#16290f', plaza: '#262319', grove: '#122408', spire: '#20240f', hamlet: '#122408' };
+  // Regions: macro biome recolours the chunk background — tan scorch, deep-green deepgreen,
+  // grey-brown ashen (canopy/spire/hamlet keep the per-type colour above).
+  const bgBiome = { scorch: '#2a2412', deepgreen: '#0c1c06', ashen: '#22201c' };
   for (const c of chunks.values()) {
     const dx = c.ix * CHUNK - px, dz = c.iz * CHUNK - pz;
     if (Math.abs(dx) > 190 || Math.abs(dz) > 190) continue;
-    mmx.fillStyle = bgFor[c.type] || '#1a2114';
+    mmx.fillStyle = (c.region && bgBiome[c.region.biome]) || bgFor[c.type] || '#1a2114';
     mmx.fillRect(dx + 1.5, dz + 1.5, CHUNK - 3, CHUNK - 3); // gap = streets
     for (const r of c.mini.rects) {
       mmx.fillStyle = r[4] > 30 ? '#4a4f45' : '#3a4036';
@@ -785,6 +796,33 @@ function drawMinimap() {
       mmx.fillRect(hdx - 3, hdz - 2, 6, 4);                        // hut body
       mmx.beginPath(); mmx.moveTo(hdx - 4, hdz - 2); mmx.lineTo(hdx, hdz - 6); mmx.lineTo(hdx + 4, hdz - 2); mmx.fill();   // roof
     }
+  }
+  // Second Seed (Part 2): the planted oasis — a green dot in the tan, drawn like the hamlet hut.
+  if (typeof STORY_SAVE !== 'undefined' && STORY_SAVE.planted) {
+    const oa = { x: (SPIRE.cx + STORY_SAVE.planted.dx) * CHUNK + 32, z: (SPIRE.cz + STORY_SAVE.planted.dz) * CHUNK + 32 };
+    const odx = oa.x - px, odz = oa.z - pz;
+    if (Math.abs(odx) < 190 && Math.abs(odz) < 190) {
+      mmx.fillStyle = '#6fe86f';
+      mmx.beginPath(); mmx.arc(odx, odz, 3.2, 0, 7); mmx.fill();
+      mmx.fillStyle = 'rgba(111,232,111,0.35)';
+      mmx.beginPath(); mmx.arc(odx, odz, 6.5, 0, 7); mmx.fill();
+    }
+  }
+  // Seedbearer reward (Part 2, post-campaign): faint icons on anomaly landmarks in loaded chunks —
+  // "you have learned to read the city the way the Authority did."
+  if (typeof storyComplete === 'function' && storyComplete()) {
+    mmx.fillStyle = 'rgba(206,191,154,0.5)';
+    for (const c of chunks.values()) {
+      if (c.type !== 'colossus' && c.type !== 'sinkhole' && c.type !== 'reservoir' && c.type !== 'fallen') continue;
+      const lx = c.ix * CHUNK + 32 - px, lz = c.iz * CHUNK + 32 - pz;
+      if (Math.abs(lx) > 190 || Math.abs(lz) > 190) continue;
+      mmx.fillRect(lx - 2, lz - 2, 4, 4);
+    }
+  }
+  // The Archivist (Part 2 campaign giver) — an amber dot at the spire base while the campaign runs.
+  if (typeof archivist !== 'undefined' && archivist && typeof story !== 'undefined' && story.ch <= 7) {
+    mmx.fillStyle = '#ffb04a';
+    mmx.beginPath(); mmx.arc(archivist.g.position.x - px, archivist.g.position.z - pz, 3, 0, 7); mmx.fill();
   }
   // summited vantages — faint pins that persist
   mmx.fillStyle = 'rgba(180,210,120,0.55)';
@@ -877,6 +915,12 @@ const DISTRICT_MOOD = {
   glass: 'Glass towers, tiered and cold. The vines have barely started on these — the light still catches every pane.',
   works: 'Rust and old machines. Silos and sawtooth sheds, a dead chimney against the sky. The air tastes of iron.',
   garden: 'Little houses with yards and low fences. Someone’s laundry never came in; the gardens have gone to seed.',
+};
+// Regions: first-entry mood line per non-canopy macro biome (once, at ground level).
+const BIOME_MOOD = {
+  scorch: 'The leaves thin, then fail. Open sky over dead streets — the sun owns this quarter. Cross it fast, or cross it at night.',
+  deepgreen: 'Under the deep green the day never quite arrives. Trunks like towers, towers like trunks — the city is only a rumor down here.',
+  ashen: 'Whole blocks gone to rubble under a healthy roof of leaves. Whatever emptied these streets, the forest never noticed.',
 };
 
 /* ======================================================================== */
@@ -1019,7 +1063,10 @@ function sfxStep() {
 let dayT = 0.30;  // 07:12, a long green morning
 let lastT = performance.now();
 let frames = 0, fpsT = 0, hudT = 0, mapT = 0;
+// Persisted so the Second Seed campaign (Part 2) can gate on it across sessions: the Archivist
+// only opens the trail once the player has summited the Spire and seen the whole green world.
 let summited = false;
+try { summited = localStorage.getItem('canopy.summited') === '1'; } catch (e) { }
 let gHold = 0;
 
 // initial world
@@ -1051,6 +1098,9 @@ if (SHOT) {
     player.pos.set(Math.cos(spawnAngle) * spawnDist, 0, 30 + Math.sin(spawnAngle) * spawnDist);
     player.yaw = Math.PI; player.pitch = 0.04;
   }
+  // Dev/screenshot spawn override: ?px=&pz= drop the camera at chosen world coords (SHOT only).
+  const _spx = params.get('px'), _spz = params.get('pz');
+  if (_spx !== null && _spz !== null) { player.pos.set(+_spx, 0, +_spz); player.yaw = Math.PI; player.pitch = 0.04; }
   ensureChunks(player.pos.x, player.pos.z, true);
   if (SHOT === '4') syncHamletResidents(0.016);   // residents in frame for the hamlet shot
   if (SHOT !== '2' && SHOT !== '4' && SHOT !== '5') { // a few citizens in frame
@@ -1149,6 +1199,8 @@ function loop() {
     if (player.pos.y < 6) {
       const dc = chunkAt(player.pos.x, player.pos.z);
       if (dc && dc.type !== 'spire') once('district-' + dc.style, () => msg(DISTRICT_MOOD[dc.style], 7));
+      // Regions: mood line the first time the current chunk's biome is a non-canopy one.
+      if (dc && dc.region && dc.region.biome !== 'canopy') once('biome-' + dc.region.biome, () => msg(BIOME_MOOD[dc.region.biome], 9));
     }
     for (const n of npcs) {
       if (Math.hypot(n.g.position.x - player.pos.x, n.g.position.z - player.pos.z) < 7) {
@@ -1170,6 +1222,7 @@ function loop() {
     if (player.heat > 70) once('hot', () => hint('TOO HOT — get under the leaves or wait for dusk', 5));
     if (!summited && checkSummit(SPIRE.x, SPIRE.z, SPIRE.size / 2, SPIRE.size / 2, SPIRE.h)) {
       summited = true;
+      try { localStorage.setItem('canopy.summited', '1'); } catch (e) { }   // unlocks the Second Seed campaign
       doneVantages.add(Math.round(SPIRE.x) + ',' + Math.round(SPIRE.z));
       msg('The Spire. From here the green goes to every horizon — the city is a forest, and the forest is the world now.', 10, true);
       setTimeout(() => msg('Outside the canopy it is 54 °C. There is nowhere to escape to. Head back down — home is under the leaves.', 9, true), 10500);
@@ -1183,6 +1236,10 @@ function loop() {
 
     if (!SHOT) updateMissions(dt, time);   // give / advance the current errand (never in screenshot mode)
     if (!SHOT) updateTrials(dt, time);     // trial-masters, active trial timing & markers
+    // Second Seed campaign (Part 2): runs after trials so its objective/markers win the frame when
+    // no trial/errand is live. Objective priority is trial > errand > story > SPIRE — enforced inside
+    // updateStory, which only writes activeObjective/HUD when no trial or errand is active.
+    if (!SHOT && typeof updateStory === 'function') updateStory(dt, time);
 
     // abandon a trial by holding G (hint given in the start message) — never soft-locks
     if (trial) {
@@ -1198,7 +1255,9 @@ function loop() {
     const hrs = dayT * 24, hh = Math.floor(hrs), mmn = Math.floor((hrs - hh) * 60);
     clockEl.textContent = String(hh).padStart(2, '0') + ':' + String(mmn).padStart(2, '0');
     const c = chunkAt(player.pos.x, player.pos.z);
-    districtEl.textContent = (c && c.ix === HAMLET.cx && c.iz === HAMLET.cz && hamletFound) ? 'The Hidden Hamlet' : (c ? c.name : '—');
+    // Regions: append the macro biome for non-canopy quarters ("— the Scorch" etc.)
+    const bsuf = (c && c.region && { scorch: ' — the Scorch', deepgreen: ' — the Deep Green', ashen: ' — the Ash Quarters' }[c.region.biome]) || '';
+    districtEl.textContent = (c && c.ix === HAMLET.cx && c.iz === HAMLET.cz && hamletFound) ? 'The Hidden Hamlet' : (c ? c.name + bsuf : '—');
     airEl.textContent = Math.round(air);
     altEl.textContent = Math.round(player.pos.y);
     const coverE = player.sunE;

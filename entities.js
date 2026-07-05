@@ -51,6 +51,8 @@ scene.add(flies.mesh);
 function updateDrifters(time, px, py, pz) {
   updateWind(time);                                  // global wind advances every frame
   const wpx = wind.dirX * wind.strength * 0.02, wpz = wind.dirZ * wind.strength * 0.02;   // pollen drift bias
+  // Regions: deepgreen night reads bioluminescent — fireflies glow ×1.8 over the player's chunk.
+  const _fc = chunkAt(px, pz), flyMul = (_fc && _fc.region && _fc.region.biome === 'deepgreen') ? 1.8 : 1;
   // pollen drifts; both wrap around the player
   for (const D of [pollen, flies]) {
     const isFly = D === flies;
@@ -61,7 +63,7 @@ function updateDrifters(time, px, py, pz) {
         x += Math.sin(time * 0.7 * s1 + s0) * 0.02; z += Math.cos(time * 0.6 * s1 + s0 * 2) * 0.02;
         y += Math.sin(time * 0.9 * s1 + s0 * 3) * 0.008;
         const blink = Math.max(0, Math.sin(time * 2.2 * s1 + s0 * 5));
-        const b = blink * blink * nightF;
+        const b = blink * blink * nightF * flyMul;
         D.col[i * 3] = D.base.r * b; D.col[i * 3 + 1] = D.base.g * b; D.col[i * 3 + 2] = D.base.b * b;
       } else {
         x += Math.sin(time * 0.22 + s0) * 0.012 + wpx; y -= 0.004 * s1; z += Math.cos(time * 0.18 + s0) * 0.012 + wpz;
@@ -93,6 +95,10 @@ const NPC_SKINS = [0x8a6a52, 0x6b4b38, 0xa3826a, 0x5a4335, 0x96755d]
   .map(h => new THREE.MeshStandardMaterial({ color: h, roughness: 0.9 }));
 const npcWoodMat = new THREE.MeshStandardMaterial({ color: 0x4a3b2e, roughness: 1 });
 const npcLanternMat = new THREE.MeshStandardMaterial({ color: 0x2a2a22, emissive: srgb(0xffd9a0), emissiveIntensity: 0, roughness: 0.6 });
+// The Archivist (Part 2 campaign giver): a dusty-amber cloak + pale papers, distinct from the
+// eight citizen cloaks so the campaign's one NPC reads on sight.
+const npcArchivistCloak = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 1 });
+const npcPaperMat = new THREE.MeshStandardMaterial({ color: 0xcabf9a, roughness: 0.9 });
 
 const npcs = [];
 function makeNPCGroup(kid, role) {
@@ -118,6 +124,16 @@ function makeNPCGroup(kid, role) {
     const staff = new THREE.Mesh(tplCyl, npcWoodMat); staff.scale.set(0.035, 2.0, 0.035); staff.position.set(0.34, 0, 0.06);
     const orb = new THREE.Mesh(tplBlob, npcLanternMat); orb.scale.setScalar(0.13); orb.position.set(0.34, 2.05, 0.06);
     g.add(staff, orb); anim = orb;
+  } else if (role === 'archivist') {
+    // the trial-master body (carved staff + glowing orb) recloaked in dusty amber, with a
+    // small stack of crates and loose papers at the feet — the Authority's surviving records.
+    cloak.material = npcArchivistCloak; hood.material = npcArchivistCloak;
+    const staff = new THREE.Mesh(tplCyl, npcWoodMat); staff.scale.set(0.035, 2.0, 0.035); staff.position.set(0.34, 0, 0.06);
+    const orb = new THREE.Mesh(tplBlob, npcLanternMat); orb.scale.setScalar(0.12); orb.position.set(0.34, 2.05, 0.06);
+    const crate = new THREE.Mesh(tplBox, npcWoodMat); crate.scale.set(0.5, 0.34, 0.36); crate.position.set(-0.46, 0, 0.12);
+    const crate2 = new THREE.Mesh(tplBox, npcWoodMat); crate2.scale.set(0.36, 0.22, 0.42); crate2.position.set(-0.52, 0.34, 0.08);
+    const paper = new THREE.Mesh(tplBox, npcPaperMat); paper.scale.set(0.32, 0.04, 0.28); paper.position.set(-0.52, 0.57, 0.08);
+    g.add(staff, orb, crate, crate2, paper); anim = orb;
   } else if (role === 'chat' || role === 'vendor') {
     // a simple pivoting arm so a talker/vendor can raise a hand while gesturing
     const arm = new THREE.Group();
@@ -237,6 +253,7 @@ function updateNPCs(dt, time) {
   const pc = chunkAt(player.pos.x, player.pos.z);
   const market = !!pc && dayF > 0.35 && (pc.type === 'plaza' || (pc.type === 'city' && pc.colData.stallAnchors && pc.colData.stallAnchors.length > 0));
   if (market) want = Math.round(want * 1.4);
+  if (pc && pc.region && pc.region.biome === 'ashen') want = Math.round(want * 0.5);   // Regions: the Ash Quarters feel emptied
   if (npcs.length < want && Math.random() < 0.12) spawnNPC();
   // Vignettes: kids chasing a fountain/lamp; a vendor+customer at a stall. Day only, never in
   // SHOT (randomness-heavy, could jitter screenshots — mirrors how boars/leapers gate on SHOT).

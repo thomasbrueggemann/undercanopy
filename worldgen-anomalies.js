@@ -64,7 +64,7 @@ function addColossus(B, colData, mini, rng, ox, oz) {
 function addFallen(B, colData, mini, rng, ox, oz) {
   const h = 28 + rng() * 8;
   const sx = ox + 24 + rng() * 6, sz = oz + 40 + rng() * 6, w = 12 + rng() * 3, d = 12 + rng() * 3;
-  addBuilding(B, colData, mini, rng, sx, sz, w, d, h, { vines: true, allSides: true, garden: false, style: 'blocks', noTier: true });
+  addBuilding(B, colData, mini, rng, sx, sz, w, d, h, { vines: true, allSides: true, garden: false, style: 'blocks', noTier: true, noRegion: true });   // noRegion: keep h so the ramp meets the roof
   // fallen shell leans from a street base up to the standing tower's south face at roof height
   const baseX = sx, baseZ = sz - d / 2 - h * 0.72, topX = sx, topZ = sz - d / 2 - 1, topY = h - 1;
   const dxx = topX - baseX, dzz = topZ - baseZ, horiz = Math.hypot(dxx, dzz);
@@ -961,6 +961,10 @@ function buildChunk(ix, iz) {
   const type = chunkType(ix, iz);
   const style = districtStyle(ix, iz);        // Districts (Phase A): architectural identity
   CUR_STYLE = style;                          // addBuilding reads this unless opts.style given
+  const REG = regionAt(ix, iz);               // Regions (Part 1): macro-biome descriptor
+  CUR_REG = REG;                              // builders read this (leaf tint, buildings, grass, lamps)
+  const biome = REG.biome;
+  const vd = clamp((REG.verdancy - 0.51) / 0.21, -1, 1);   // −1..1 across the canopy band (micro-drift)
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
   const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [],
@@ -972,18 +976,34 @@ function buildChunk(ix, iz) {
   let openRect = null; // area open to the sky at ground level
 
   /* ---- street trees along west (x=ox) and south (z=oz) borders ---- */
+  // Regions: skip rate + spacing drive street-tree density. scorch kills ~75% (survivors are
+  // dead snags or sun-stunted); deepgreen thickens ×1.6 and grows bigger with occasional giants;
+  // canopy micro-drifts ±25% with verdancy.
+  let skipP = 0.22, spaceMul = 1;
+  if (biome === 'scorch') skipP = 0.75;
+  else if (biome === 'deepgreen') { skipP = 0.12; spaceMul = 1 / 1.6; }
+  else skipP = clamp(0.22 - vd * 0.14, 0.05, 0.4);
   const treeLine = (horiz) => {
     let t = 6 + rng() * 8;
     while (t < CHUNK - 6) {
       for (const off of [-6.5, 6.5]) {
-        if (rng() < 0.22) continue; // sun gaps
+        if (rng() < skipP) continue; // sun gaps
         const jx = (rng() - 0.5) * 2, jz = (rng() - 0.5) * 2;
         const px = horiz ? ox + t + jx : ox + off + jx;
         const pz = horiz ? oz + off + jz : oz + t + jz;
-        const h = 20 + rng() * 11, R = 8 + rng() * 5;
-        addTree(B, colData, mini, rng, px, pz, h, R);
+        if (biome === 'scorch') {   // survivors: half bleached dead snags, half sun-stunted (h 8–14, R 3–5)
+          if (rng() < 0.5) addTree(B, colData, mini, rng, px, pz, 8 + rng() * 6, 3 + rng() * 2, { dead: true });
+          else addTree(B, colData, mini, rng, px, pz, 8 + rng() * 6, 3 + rng() * 2);
+          continue;
+        }
+        let h = 20 + rng() * 11, R = 8 + rng() * 5, topts;
+        if (biome === 'deepgreen') {
+          h *= 1.2; R *= 1.15;
+          if (rng() < 0.15) { topts = { trunkR: 1.9 + rng() * 0.7, blobs: 7 }; h = 33 + rng() * 7; R = 13 + rng() * 4; }   // a giant in any chunk type
+        }
+        addTree(B, colData, mini, rng, px, pz, h, R, topts);
       }
-      t += 12 + rng() * 6;
+      t += (12 + rng() * 6) * spaceMul;
     }
   };
   if (type !== 'plaza' || rng() < 0.6) { treeLine(true); treeLine(false); }
@@ -1010,7 +1030,9 @@ function buildChunk(ix, iz) {
       else addLamp(B, colData, rng, ox + t, oz + side, side > 0 ? -Math.PI / 2 : Math.PI / 2);
     }
   }
-  const carN = (type === 'city' || type === 'towers') ? 3 + (rng() * 4 | 0) : 1 + (rng() * 2 | 0);
+  let carN = (type === 'city' || type === 'towers') ? 3 + (rng() * 4 | 0) : 1 + (rng() * 2 | 0);
+  if (biome === 'scorch') carN = Math.round(carN * 0.5);   // Regions: fewer parked cars in the dead quarter
+
   for (let k = 0; k < carN; k++) {
     const axis = rng() < 0.5 ? 0 : 1;
     const t = 6 + rng() * (CHUNK - 12);
@@ -1054,7 +1076,10 @@ function buildChunk(ix, iz) {
         if (along < 5) break;
         const depth = dm.d;
         const center = INSET + t + along / 2;
-        if (rng() < (style === 'works' ? 0.9 : 0.84)) {
+        // Regions: ashen doubles the collapsed-lot rate (dead city under an intact roof).
+        const baseBuildP = style === 'works' ? 0.9 : 0.84;
+        const buildP = biome === 'ashen' ? Math.max(0, 1 - (1 - baseBuildP) * 2) : baseBuildP;
+        if (rng() < buildP) {
           const h = dm.h;
           let bx, bz, bw, bd;
           if (side === 0) { bx = ox + center; bz = oz + INSET + depth / 2; bw = along; bd = depth; }
@@ -1157,6 +1182,14 @@ function buildChunk(ix, iz) {
     B.plain.addGeo(tplBox, compose(SPIRE.x + 6, SPIRE.h + 5.5, SPIRE.z + 6, 0.12, 0.12, 2.6), COL.rust, 0.1, rng);
     B.lamp.addGeo(tplBlob, compose(SPIRE.x + 6, SPIRE.h + 10, SPIRE.z + 6, 0.35, 0.35, 0.35), srgb(0xffe0b0), 0, rng);
     colData.trunks.push({ x: SPIRE.x + 6, z: SPIRE.z + 6, r: 0.3, h: SPIRE.h + 10 });
+    // The Second Seed finale (Part 2, Ch7): the beacon relit — a constant-emissive head at
+    // the mast tip that now exists permanently once the campaign is done. Extra mesh (matLampLit
+    // is not a batch material) so it glows day and night against the sky like a lit beacon.
+    if (typeof storyComplete === 'function' && storyComplete()) {
+      const beacon = new THREE.Mesh(tplBlob, matLampLit); beacon.scale.setScalar(0.55);
+      beacon.position.set(SPIRE.x + 6, SPIRE.h + 10, SPIRE.z + 6);
+      extraMeshes.push(beacon);
+    }
   } else if (type === 'colossus') {
     addColossus(B, colData, mini, rng, ox, oz);
   } else if (type === 'fallen') {
@@ -1188,7 +1221,10 @@ function buildChunk(ix, iz) {
   }
 
   /* ---- grass (+~35% density; occasional tall clumps for a more overgrown floor) ---- */
-  const nGrass = type === 'park' ? 230 : type === 'grove' ? 162 : type === 'plaza' ? 80 : 135;
+  // Regions: scorch sparse straw (addGrassTuft tints it), deepgreen lush.
+  let nGrass = type === 'park' ? 230 : type === 'grove' ? 162 : type === 'plaza' ? 80 : 135;
+  if (biome === 'scorch') nGrass = Math.round(nGrass * 0.4);
+  else if (biome === 'deepgreen') nGrass = Math.round(nGrass * 1.3);
   for (let k = 0; k < nGrass; k++) {
     // bias toward street edges and block border (sidewalks)
     let gx, gz;
@@ -1208,7 +1244,9 @@ function buildChunk(ix, iz) {
   }
 
   /* ---- glow plants (night bioluminescence) ---- */
-  const nGlow = 5 + (rng() * 6 | 0);
+  // Regions: deepgreen night should feel bioluminescent — glow plants ×1.8 (fireflies too, at runtime).
+  let nGlow = 5 + (rng() * 6 | 0);
+  if (biome === 'deepgreen') nGlow = Math.round(nGlow * 1.8);
   for (let k = 0; k < nGlow; k++) {
     if (mini.trees.length === 0) break;
     const t = mini.trees[(rng() * mini.trees.length) | 0];
@@ -1216,12 +1254,41 @@ function buildChunk(ix, iz) {
     addGlowPlant(B, rng, t[0] + Math.cos(a) * d, t[1] + Math.sin(a) * d, 0.25 + rng() * 0.3);
   }
 
+  /* ---- Regions: biome ground dressing ---- */
+  if (biome === 'deepgreen') {
+    // grass breaking through the asphalt itself — ~8 tufts on the street surface near the borders
+    for (let k = 0; k < 8; k++) {
+      const onX = rng() < 0.5;
+      const gx = onX ? ox + rng() * CHUNK : ox + (rng() < 0.5 ? 0 : CHUNK) + (rng() - 0.5) * 6;
+      const gz = onX ? oz + (rng() < 0.5 ? 0 : CHUNK) + (rng() - 0.5) * 6 : oz + rng() * CHUNK;
+      addGrassTuft(B, rng, gx, gz, 0.4 + rng() * 0.5);
+    }
+  } else if (biome === 'scorch') {
+    // 2–4 bleached snag trunks (dead trees) standing in the open
+    const nSnag = 2 + (rng() * 3 | 0);
+    for (let k = 0; k < nSnag; k++)
+      addTree(B, colData, mini, rng, ox + lerp(b0, b1, rng()), oz + lerp(b0, b1, rng()), 6 + rng() * 7, 3 + rng() * 2, { dead: true });
+  } else if (biome === 'ashen') {
+    // extra rubble rocks strewn along the street edges
+    const nRub = 4 + (rng() * 4 | 0);
+    for (let k = 0; k < nRub; k++) {
+      const onX = rng() < 0.5, rr = 0.7 + rng() * 1.4;
+      const rx = onX ? ox + rng() * CHUNK : ox + (rng() < 0.5 ? 6 : CHUNK - 6);
+      const rz = onX ? oz + (rng() < 0.5 ? 6 : CHUNK - 6) : oz + rng() * CHUNK;
+      B.plain.addGeo(tplRock, compose(rx, rr * 0.2, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+    }
+  }
+
   /* ---- multi-layered canopy (Phase 1): L1 bough roads + L2 weave ---- */
   // The Hidden Hamlet builds its own bridges + a dedicated dense Weave, and must stay clear
   // of viaducts/canals/oddities cutting through its clearing — so it skips the shared passes.
   if (type !== 'hamlet') {
-    addBoughRoads(B, colData, rng, ox, oz, type);
-    addWeave(B, colData, rng, ix, iz, ox, oz, type);
+    // Regions: scorch — the canopy failed here; no bough roads / weave / crown nests overhead
+    // (exposure then follows from the real shadow rays, no heat hack needed).
+    if (biome !== 'scorch') {
+      addBoughRoads(B, colData, rng, ox, oz, type);
+      addWeave(B, colData, rng, ix, iz, ox, oz, type);
+    }
 
     /* ---- Anomalies (Phase A): the Elevated Line viaduct along rare grid lines ---- */
     addViaduct(B, colData, mini, rng, ix, iz, ox, oz);
@@ -1236,6 +1303,26 @@ function buildChunk(ix, iz) {
   /* ---- Little details (sprinkle pass): benches, mailboxes, laundry, puddles,
           mushrooms, cobwebs — small, deterministic, individually sparse ---- */
   addLittleDetails(B, colData, mini, rng, ix, iz, ox, oz, type, style);
+
+  /* ---- The Second Seed sapling (Part 2, Ch7): a permanent oasis where the player
+          planted it. Cheap guard (storyPlantedAt is a spire-relative compare); only the
+          one planted chunk matches. Built here so it hot-swaps on plant AND regenerates
+          on later loads/re-rolls. ---- */
+  if (typeof storyPlantedAt === 'function' && storyPlantedAt(ix, iz)) {
+    const sx = ox + 32, sz = oz + 32;
+    const savedReg = CUR_REG; CUR_REG = null;   // vivid canopy leaves, not the scorch olive tint
+    addTree(B, colData, mini, rng, sx, sz, 26, 13, { trunkR: 1.6, blobs: 7 });   // young giant
+    CUR_REG = savedReg;
+    for (let k = 0; k < 10; k++) {              // ring of glow plants
+      const a = k / 10 * Math.PI * 2;
+      addGlowPlant(B, rng, sx + Math.cos(a) * 4.5, sz + Math.sin(a) * 4.5, 0.3 + rng() * 0.2);
+    }
+    for (let k = 0; k < 26; k++) {              // grass breaking the dead asphalt
+      const a = rng() * 7, d = rng() * 9;
+      addGrassTuft(B, rng, sx + Math.cos(a) * d, sz + Math.sin(a) * d, 0.5 + rng() * 0.6);
+    }
+    mini.oasis = { x: sx, z: sz };              // minimap: an oasis dot in the tan (drawn like the hamlet hut)
+  }
 
   /* ---- assemble ---- */
   const group = new THREE.Group();
@@ -1254,6 +1341,6 @@ function buildChunk(ix, iz) {
   ];
   for (const m of meshes) if (m) group.add(m);
   for (const m of extraMeshes) group.add(m);
-  return { ix, iz, group, colData, mini, openRect, type, style, name: districtName(ix, iz) };
+  return { ix, iz, group, colData, mini, openRect, type, style, region: REG, name: districtName(ix, iz) };
 }
 

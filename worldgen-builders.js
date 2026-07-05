@@ -13,10 +13,19 @@ function baseChunkType(ix, iz) {
   if (rr < 0.105) return 'sinkhole';        // ~1/25
   if (rr < 0.145) return 'reservoir';       // ~1/25
   const r = hash2(ix, iz, 1) / 4294967296;
-  if (r < 0.55) return 'city';
-  if (r < 0.67) return 'park';
-  if (r < 0.76) return 'plaza';
-  if (r < 0.92) return 'towers';
+  // Regions: remap the common-type weights per macro biome (anomaly/spire/hamlet
+  // untouched above). Base weights match the old thresholds: city .55 park .12 plaza
+  // .09 towers .16 grove .08. regionBiome is allocation-free (cheap in ring scans).
+  const biome = regionBiome(ix, iz);
+  let wCity = 0.55, wPark = 0.12, wPlaza = 0.09, wTowers = 0.16, wGrove = 0.08;
+  if (biome === 'scorch') { wPlaza *= 2.5; wCity += wGrove; wGrove = 0; }                 // plaza-heavy, grove→city
+  else if (biome === 'deepgreen') { wGrove *= 3; wPark *= 1.5; wCity += wTowers; wTowers = 0; } // groves/parks, towers→city
+  if (biome === 'canopy' || biome === 'ashen') return r < 0.55 ? 'city' : r < 0.67 ? 'park' : r < 0.76 ? 'plaza' : r < 0.92 ? 'towers' : 'grove';
+  const tot = wCity + wPark + wPlaza + wTowers + wGrove;
+  let acc = wCity / tot; if (r < acc) return 'city';
+  acc += wPark / tot; if (r < acc) return 'park';
+  acc += wPlaza / tot; if (r < acc) return 'plaza';
+  acc += wTowers / tot; if (r < acc) return 'towers';
   return 'grove';
 }
 // Hidden Hamlet — one deterministic chunk in ring 6–10 (Chebyshev) around the Spire.
@@ -37,6 +46,7 @@ const HAMLET = (function () {
   const ix = SPIRE.cx + 7, iz = SPIRE.cz;                            // deterministic fallback (unreached)
   return { cx: ix, cz: iz, x: ix * CHUNK + 32, z: iz * CHUNK + 32 };
 })();
+_hamletCell = HAMLET;   // Regions: enable the hamlet full-canopy clamp now that HAMLET is known
 function chunkType(ix, iz) {
   if (ix === HAMLET.cx && iz === HAMLET.cz) return 'hamlet';
   return baseChunkType(ix, iz);
@@ -91,8 +101,10 @@ function addTree(B, colData, mini, rng, x, z, h, R, opts) {
   colData.trunks.push({ x, z, r: tr, h });
   colData.pads.push({ x, z, r: R * 0.8, y: padTop - R * 0.18 });
   mini.trees.push([x, z, R, 0]);
-  // Crown Nest on grove giants — reached by climbing the full-height trunk (h)
-  if ((opts.trunkR || 0) >= 1.9 && h >= 32 && rng() < 0.75)
+  // Crown Nest on grove giants — reached by climbing the full-height trunk (h).
+  // Regions: no nests in scorch (bough/weave/nest layer skipped), a touch more in deepgreen.
+  const nestMul = CUR_REG ? (CUR_REG.biome === 'scorch' ? 0 : CUR_REG.biome === 'deepgreen' ? 1.3 : 1) : 1;
+  if ((opts.trunkR || 0) >= 1.9 && h >= 32 && rng() < 0.75 * nestMul)
     addCrownNest(B, colData, rng, x, h, z, 2.5 + rng() * 1.4);
 }
 
@@ -224,6 +236,7 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
   if (type === 'sinkhole') return;                       // open sky over the pit is dramatic
   const N = 5, S = CHUNK / N;                            // 5×5 global cells, 12.8 m each
   const norm = (h) => (h >>> 0) / 4294967296;
+  const cov = (CUR_REG && CUR_REG.biome === 'deepgreen') ? 0.90 : 0.66;   // Regions: deepgreen ≈90% coverage
   const placed = [];
   const wells = [];                                       // interior light-well cells (for net hammocks)
   for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
@@ -232,7 +245,7 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
     const edge = (i === 0 || j === 0 || i === N - 1 || j === N - 1);   // over the street borders
     // Sky nets (Feature B): interior threshold nudged 0.60→0.66 so a little more of the
     // canopy fills in — noticeably less open sky from the street, still dappled, not a lid.
-    if (norm(h) > (edge ? 0.30 : 0.66)) {                // else: a light well — dappled, sky through
+    if (norm(h) > (edge ? 0.30 : cov)) {                 // else: a light well — dappled, sky through
       if (!edge) wells.push({ x: ox + (i + 0.5) * S, z: oz + (j + 0.5) * S, h });
       continue;
     }
@@ -339,7 +352,8 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
   // to whatever rooftop lies beneath (else the ground). Placed at platter centres so a
   // climber topping out lands cleanly on the platter's walkable pad.
   let ropes = 0;
-  const maxRopes = 2 + (rng() * 3 | 0);                  // 2..4
+  const ropeMul = (CUR_REG && CUR_REG.biome === 'deepgreen') ? 1.5 : 1;   // Regions: extra vine ropes in deepgreen
+  const maxRopes = Math.round((2 + (rng() * 3 | 0)) * ropeMul);           // 2..4 (×1.5 deepgreen)
   for (let k = 0; k < placed.length && ropes < maxRopes; k++) {
     if (rng() < 0.45) continue;
     const pl = placed[k];
@@ -478,7 +492,12 @@ function addCrownNest(B, colData, rng, x, y, z, r) {
 
 function addGrassTuft(B, rng, x, z, s, y) {
   y = y || 0;
-  const col = rng() < 0.5 ? COL.grassA : COL.grassB;
+  let col = rng() < 0.5 ? COL.grassA : COL.grassB;
+  // Regions: scorch → straw, ashen → grey-dust; deepgreen keeps the lush base green.
+  if (CUR_REG) {
+    if (CUR_REG.biome === 'scorch') col = _c.copy(COL.leafDry).multiplyScalar(0.92).clone();
+    else if (CUR_REG.biome === 'ashen') col = _c.copy(col).lerp(srgb(0x9a9a86), 0.4).clone();
+  }
   const dark = _c.copy(col).multiplyScalar(0.55).clone();
   for (let k = 0; k < 2; k++) {
     const a = rng() * Math.PI + k * Math.PI / 2;
@@ -511,6 +530,8 @@ function addWallVines(B, rng, x0, z0, x1, z1, h, side) {
 // Weathered facade tints — linear multipliers over the grey concrete atlas. Districts
 // (Phase A) swap the pool per neighbourhood so each reads as its own architecture; the
 // blocks pool doubles as the neutral fallback (concrete-heavy, the odd painted render).
+const BONE_TINT = srgb(0xcfc8b4);   // Regions: scorch sun-bleached facade wash (paler, desaturated)
+const DUST_TINT = srgb(0x8f8c82);   // Regions: ashen grey-dust facade wash
 function mkTints(a) { return a.map(v => new THREE.Color(v[0], v[1], v[2])); }
 const FACADE_TINTS = mkTints([          // blocks: pale grey / beige concrete
   [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.90, 0.89, 0.84], [0.86, 0.87, 0.85],
@@ -551,6 +572,7 @@ function districtStyle(ix, iz) {
   return 'garden';
 }
 let CUR_STYLE = 'blocks';   // set per chunk by buildChunk; read by addBuilding
+let CUR_REG = null;         // Regions: current chunk's region descriptor (set per chunk by buildChunk)
 
 // Per-style building footprint + height ranges, applied where buildChunk sizes buildings.
 // `tall` requests the taller end (towers-chunk / perimeter feature). Returns {w,d,h}.
@@ -571,7 +593,9 @@ function bldWalls(B, x0, z0, x1, z1, y0, h, bay, flr, tint, mossy, vFloorBase, u
   const uc = Math.max(1, Math.round(w / bay)), ucd = Math.max(1, Math.round(d / bay));
   const vc = Math.max(1, Math.round(h / flr));
   const vb = vo + vFloorBase, vt = vb + vc;
-  const low = (y0 <= 0.02) ? mossy : tint;         // moss creep only at true ground level
+  // moss creep at ground level; Regions: deepgreen raises the moss line to y≈3 (flora climbing)
+  const mossTop = (CUR_REG && CUR_REG.biome === 'deepgreen') ? 3 : 0.02;
+  const low = (y0 <= mossTop) ? mossy : tint;
   B.bld.quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [uo, vb, uo + ucd, vt], tint, low);
   B.bld.quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [uo, vb, uo + ucd, vt], tint, low);
   B.bld.quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [uo, vb, uo + uc, vt], tint, low);
@@ -966,9 +990,16 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   opts = opts || {};
   const style = opts.style || CUR_STYLE;
   const cfg = STYLE_CFG[style] || STYLE_CFG.blocks;
+  // Regions: deepgreen crushes the towers shorter, ashen slumps them; opts.noRegion keeps
+  // landmarks (fallen tower shell) at their designed height.
+  const rbiome = (CUR_REG && !opts.noRegion) ? CUR_REG.biome : 'canopy';
+  if (rbiome === 'deepgreen') h *= 0.8;
+  else if (rbiome === 'ashen') h *= 0.75;
   const x0 = cx - w / 2, x1 = cx + w / 2, z0 = cz - d / 2, z1 = cz + d / 2;
   const pool = STYLE_TINTS[style] || FACADE_TINTS;
   const tint = pool[(rng() * pool.length) | 0].clone().multiplyScalar(0.82 + rng() * 0.26);
+  if (rbiome === 'scorch') tint.lerp(BONE_TINT, 0.32);       // sun-bleached facades
+  else if (rbiome === 'ashen') tint.lerp(DUST_TINT, 0.22);   // grey-dusted
   const mossy = _c.copy(tint).lerp(COL.moss, 0.74).multiplyScalar(0.66).clone();  // stronger ground-level moss creep
   // per-building window rhythm from the district style (glass tight, works sparse/big)
   const bay = cfg.bay[0] + rng() * cfg.bay[1], flr = cfg.flr[0] + rng() * cfg.flr[1];
@@ -989,7 +1020,7 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   // Ruin variant (~12% of non-tiered buildings, any style except glass): a reduced,
   // roofless shell with a ragged broken parapet, one exposed interior floor slab, heavy
   // vines and rubble at a corner. Self-contained → pushes its own solid + minimap rect.
-  if (!opts.noTier && !opts.noRuin && !tiered && style !== 'glass' && rng() < 0.12) {
+  if (!opts.noTier && !opts.noRuin && !tiered && style !== 'glass' && rng() < (rbiome === 'ashen' ? 0.55 : 0.12)) {
     const rh = h * (0.4 + rng() * 0.3);
     bldWalls(B, x0, z0, x1, z1, 0, rh, bay, flr, tint, mossy, 0, uo, vo);
     const fy = rh - 3;                                             // exposed interior floor slab
@@ -1052,7 +1083,10 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
     else { B.plain.quad([x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], [0, 0, 1, 1], roofCol); }
   }
   // vines on some faces (weighted per district: heavy oldtown/works/garden, light glass/blocks)
-  const hasVines = opts.vines !== undefined ? opts.vines : rng() < clamp(0.92 * cfg.vine, 0, 0.98);
+  // Regions: scorch strips vines (need shade), deepgreen thickens them; canopy drifts ±30%.
+  let vineMul = CUR_REG ? (1 + clamp((CUR_REG.verdancy - 0.51) / 0.21, -1, 1) * 0.30) : 1;
+  if (rbiome === 'scorch') vineMul = 0.15; else if (rbiome === 'deepgreen') vineMul = 1.6;
+  const hasVines = opts.vines !== undefined ? opts.vines : rng() < clamp(0.92 * cfg.vine * vineMul, 0, 0.98);
   if (hasVines) {
     const sides = (opts.allSides || rng() < 0.4) ? [0, 1, 2, 3] : [0, 1, 2, 3].filter(() => rng() < 0.85);
     if (sides.length === 0) sides.push((rng() * 4) | 0);
@@ -1120,8 +1154,11 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
       B.leaf.addGeo(tplBlob, compose(bx, h - br * 0.15, bz, br, br * 0.55, br, 0, rng() * 7, 0), leafTintByY(rng() < 0.35 ? COL.leafDry : COL.leafB, h), 0.22, rng);
     }
   }
-  if (h > 20 && rng() < 0.25) addSpiralLimb(B, colData, rng, cx, cz, w, d, h);
-  if (h >= 30 && h <= 46 && rng() < 0.3) addCrownNest(B, colData, rng, cx, cz, h, 2.5 + rng() * 1.3);
+  // Regions: scorch skips the bough/weave/nest layer (spiral limbs + roof crown nests);
+  // deepgreen adds a few more crown nests. rng() consumed regardless to keep the stream stable.
+  const nestMul = rbiome === 'scorch' ? 0 : rbiome === 'deepgreen' ? 1.3 : 1;
+  if (h > 20 && rng() < 0.25 && rbiome !== 'scorch') addSpiralLimb(B, colData, rng, cx, cz, w, d, h);
+  if (h >= 30 && h <= 46 && rng() < 0.3 * nestMul) addCrownNest(B, colData, rng, cx, cz, h, 2.5 + rng() * 1.3);
   // Districts (Phase B): per-style ornaments hung on the finished box.
   const wallTop = tiered ? tier1Y : h;   // ornaments cling to the base tier (below any setback)
   if (style === 'oldtown') ornOldtown(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, roofType, bay);
@@ -1218,6 +1255,7 @@ function addCar(B, colData, rng, x, z, ang) {
   const rot = (lx, lz) => [x + lx * Math.cos(ang) + lz * Math.sin(ang), -lx * Math.sin(ang) + lz * Math.cos(ang) + z];
   const body = _c.copy(CAR_COLS[(rng() * CAR_COLS.length) | 0]).multiplyScalar(0.7 + rng() * 0.4).clone();
   if (rng() < 0.4) body.lerp(COL.rust, 0.4 + rng() * 0.3);
+  if (CUR_REG && CUR_REG.biome === 'scorch') body.lerp(COL.rust, 0.35);   // Regions: sun-baked cars rust brighter
   const cabin = _c.copy(body).multiplyScalar(0.45).clone();
   B.plain.addGeo(tplBox, compose(x, 0.32, z, 4.3, 0.78, 1.9, 0, ang, 0), body, 0.12, rng);
   const [cx2, cz2] = rot(-0.35, 0);
@@ -1260,7 +1298,8 @@ function addLamp(B, colData, rng, x, z, armAng) {
   const dx = Math.cos(armAng), dz = Math.sin(armAng);
   B.plain.addGeo(tplBox, compose(x + dx * 0.75, 4.42, z + dz * 0.75, 1.6, 0.12, 0.12, 0, -armAng, 0), pole, 0, rng);
   const head = compose(x + dx * 1.45, 4.18, z + dz * 1.45, 0.55, 0.2, 0.32, 0, -armAng, 0);
-  const working = rng() < 0.55;                       // rng-neutral: same single draw from the stream
+  // Regions: ashen quarters keep few working lamps (dark streets at night). rng-neutral.
+  const working = rng() < 0.55 * (CUR_REG && CUR_REG.biome === 'ashen' ? 0.3 : 1);
   if (working) B.lamp.addGeo(tplBox, head, srgb(0xfff1cf), 0, rng);
   else B.plain.addGeo(tplBox, head, COL.wire, 0, rng);
   // Little details: a bird's nest on ~10% of lamp heads — a brown ring blob + a few twigs.

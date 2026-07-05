@@ -129,7 +129,7 @@ const clouds = [];
 
 // palette keyframes (sRGB hex, converted)
 const SKY = {
-  nightTop: srgb(0x050d16), nightHor: srgb(0x0d1a20), nightSun: srgb(0x0),
+  nightTop: srgb(0x0b1826), nightHor: srgb(0x182b36), nightSun: srgb(0x0),
   dawnTop: srgb(0x2b4a74), dawnHor: srgb(0xff9a55),
   dayTop: srgb(0x6fa8dc), dayHor: srgb(0xd7e6cc),
   sunLow: srgb(0xff7f36), sunHigh: srgb(0xfff3e0),
@@ -174,14 +174,15 @@ function updateSky(t, dt) {
     sun.position.copy(sun.target.position).addScaledVector(sunDir, 170);
   } else if (moonUp) {
     sun.color.copy(SKY.moon);
-    sun.intensity = 0.32;
+    sun.intensity = 0.5;
     sun.position.copy(sun.target.position).addScaledVector(sunDir, -170);
   } else {
-    sun.intensity = 0.08;
+    sun.intensity = 0.14;
   }
-  hemi.intensity = 0.3 + dayF * 0.75;
-  hemi.color.copy(_top).lerp(_hor, 0.6);
-  amb.intensity = 0.2 + dayF * 0.24;
+  hemi.intensity = 0.37 + dayF * 0.68;
+  // raw night-sky colors are near-black, so lerp toward moonlight or the night floor does nothing
+  hemi.color.copy(_top).lerp(_hor, 0.6).lerp(SKY.moon, nightF * 0.55);
+  amb.intensity = 0.26 + dayF * 0.18 + nightF * 0.2;
   seaMat.color.copy(COL.leafB).multiplyScalar(0.16 + dayF * 0.95);
 
   // sky objects

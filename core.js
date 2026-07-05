@@ -27,6 +27,56 @@ function hash2(ix, iz, salt) {
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0);
 }
+
+/* ------------------------------------------------------- region field (macro) --
+   Two smooth scalar fields (verdancy, ruin) over chunk coords select a macro biome
+   that breaks the world's uniformity into bands/pockets hundreds of metres wide.
+   Value noise = bilinear interp of hashed lattice corners with a smoothstep fade, at
+   wavelength 12 chunks plus a 0.35-amplitude octave at 5 for edge wobble. Everything
+   here is allocation-free (valueNoise2 / regionBiome are called in baseChunkType's
+   weight remap and in mission/trial ring scans over hundreds of chunks). Thresholds
+   were tuned so a 100×100 window lands scorch≈15% deepgreen≈14% ashen≈8%.
+   The Spire and Hamlet chunks (and their 8 neighbours each) clamp to full canopy so
+   the tutorial landmark and the hidden village never spawn sun-blasted. _hamletCell is
+   filled in once HAMLET is known (worldgen-builders.js); it is null during that IIFE,
+   when the hamlet clamp is a harmless no-op (the remap can't change hamlet selection). */
+function valueNoise2(x, z, salt) {
+  const x0 = Math.floor(x), z0 = Math.floor(z), fx = x - x0, fz = z - z0;
+  const sx = fx * fx * (3 - 2 * fx), sz = fz * fz * (3 - 2 * fz);
+  const a = hash2(x0, z0, salt) / 4294967296;
+  const b = hash2(x0 + 1, z0, salt) / 4294967296;
+  const c = hash2(x0, z0 + 1, salt) / 4294967296;
+  const d = hash2(x0 + 1, z0 + 1, salt) / 4294967296;
+  const top = a + (b - a) * sx, bot = c + (d - c) * sx;
+  return top + (bot - top) * sz;
+}
+let _hamletCell = null;   // set to HAMLET after worldgen-builders.js computes it
+function _clampCanopy(ix, iz) {
+  return (Math.abs(ix - SPIRE.cx) <= 1 && Math.abs(iz - SPIRE.cz) <= 1) ||
+    (_hamletCell && Math.abs(ix - _hamletCell.cx) <= 1 && Math.abs(iz - _hamletCell.cz) <= 1);
+}
+function _verdancy(ix, iz) { return 0.65 * valueNoise2(ix / 12, iz / 12, 4201) + 0.35 * valueNoise2(ix / 5, iz / 5, 4202); }
+function _ruin(ix, iz) { return 0.65 * valueNoise2(ix / 12, iz / 12, 4301) + 0.35 * valueNoise2(ix / 5, iz / 5, 4302); }
+// Allocation-free biome string — the hot path used by baseChunkType and ring scans.
+function regionBiome(ix, iz) {
+  let v = _verdancy(ix, iz), r = _ruin(ix, iz);
+  if (_clampCanopy(ix, iz)) { if (v < 0.45) v = 0.45; if (r > 0.5) r = 0.5; }
+  if (v < 0.32) return 'scorch';          // canopy failed here — open sun, bleached
+  if (v > 0.66) return 'deepgreen';       // engineered flora won completely
+  if (r > 0.66) return 'ashen';           // intact canopy, dead city
+  return 'canopy';
+}
+// Full descriptor (fresh object) — called once per chunk in buildChunk, plus by the
+// minimap/HUD and (Part 2) the campaign's nearestBiomeChunk. Globally accessible.
+function regionAt(ix, iz) {
+  let verdancy = _verdancy(ix, iz), ruin = _ruin(ix, iz);
+  if (_clampCanopy(ix, iz)) { if (verdancy < 0.45) verdancy = 0.45; if (ruin > 0.5) ruin = 0.5; }
+  let biome = 'canopy';
+  if (verdancy < 0.32) biome = 'scorch';
+  else if (verdancy > 0.66) biome = 'deepgreen';
+  if (biome === 'canopy' && ruin > 0.66) biome = 'ashen';
+  return { verdancy, ruin, biome };
+}
 // Colors authored in sRGB, converted once to linear (r152 color management).
 function srgb(hex) { return new THREE.Color(hex).convertSRGBToLinear(); }
 const _c = new THREE.Color();
@@ -49,6 +99,26 @@ const SPIRE = randomizeSPIRE();
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot');   // screenshot/smoke-test mode
 
+/* ------------------------------------------------- campaign save (Part 2) --
+   "The Second Seed" 7-chapter campaign persists here. Parsed ONCE at load so
+   worldgen can read planted/complete state BEFORE story.js (which loads LAST):
+   chunks build before story.js runs, so the sapling guard in buildChunk and the
+   relit-spire beacon must read the persisted state directly. story.js owns all
+   writes and keeps STORY_SAVE in sync in memory. `planted` is stored spire-relative
+   (offset in chunks) so the grown oasis survives the per-session SPIRE re-roll —
+   the same tradeoff the Hidden Hamlet makes. */
+let STORY_SAVE = { v: 1, ch: 1, shards: 0, haveKey: false, haveSeed: false, planted: null, seedbearer: false, foundHamletViaStory: false };
+try {
+  const _ss = JSON.parse(localStorage.getItem('canopy.story') || 'null');
+  if (_ss && _ss.v === 1) STORY_SAVE = Object.assign(STORY_SAVE, _ss);
+} catch (e) { }
+// Does chunk (ix,iz) hold the planted Second Seed? Spire-relative + cheap → safe in buildChunk.
+function storyPlantedAt(ix, iz) {
+  const p = STORY_SAVE.planted;
+  return !!p && ix === SPIRE.cx + p.dx && iz === SPIRE.cz + p.dz;
+}
+function storyComplete() { return STORY_SAVE.ch > 7; }   // campaign done → relit spire beacon + Seedbearer map
+
 /* ------------------------------------------------------------- renderer -- */
 const canvas = document.getElementById('game');
 let renderer;
@@ -64,7 +134,7 @@ renderer.setSize(innerWidth, innerHeight);
 if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
 else renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.35;
+renderer.toneMappingExposure = 1.45;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -742,10 +812,22 @@ const SIGN_COLS = [0x7a3b32, 0x35526b, 0x8a6b2f, 0x4e6242, 0x6b4a6e, 0x2f5a55].m
 // up in the crowns — so the strata separate when you look straight up from the street.
 // Cheap: a per-blob vertex-colour lerp picked at emission time by the blob's world y.
 // Returns a fresh Color (safe to hand to addGeo, which reads r/g/b).
+// Regions: macro-biome foliage shifts, lerped over the height-graded tint (no new
+// materials — the leaf batch is vertex-coloured). CUR_REG is the current chunk's region
+// (worldgen-builders.js), null outside a chunk build.
+const LEAF_SCORCH = srgb(0x8a7a3a);   // olive/tan sun-killed foliage
+const LEAF_DEEP = srgb(0x1e4412);     // saturated dark green — the flora won
+const LEAF_ASH = srgb(0x8f938a);      // grey-dusted (dead city under an intact roof)
 function leafTintByY(base, y) {
   const t = smooth(8, 38, y);                               // 0 street canopy · 1 emergent crowns
-  return _c.copy(base).multiplyScalar(0.80 + 0.42 * t)      // darker low → brighter high
-    .lerp(COL.leafDry, t * 0.14).clone();                  // faint sun-bleach up top
+  const c = _c.copy(base).multiplyScalar(0.80 + 0.42 * t)   // darker low → brighter high
+    .lerp(COL.leafDry, t * 0.14);                           // faint sun-bleach up top
+  if (typeof CUR_REG !== 'undefined' && CUR_REG) {
+    if (CUR_REG.biome === 'scorch') c.lerp(LEAF_SCORCH, 0.55);
+    else if (CUR_REG.biome === 'deepgreen') c.lerp(LEAF_DEEP, 0.40);
+    else if (CUR_REG.biome === 'ashen') c.lerp(LEAF_ASH, 0.22);
+  }
+  return c.clone();
 }
 
 /* ----------------------------------------------------------- city naming -- */

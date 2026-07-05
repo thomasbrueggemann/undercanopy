@@ -58,6 +58,13 @@ python3 -m http.server 8080   # then open http://localhost:8080
     body heat fills the bar. The heat gauge *is* the timer.
   - **Lamplighter** — at dusk, wake the dead street-lamps down a row before true night.
   - **Deliveries** — carry a parcel to someone in a neighbouring named district.
+- **The Second Seed** — a 7-chapter story campaign that unlocks once you've summited the
+  Spire. An old under-dweller, **the Archivist**, keeps the fallen Botanic Authority's
+  papers and needs young legs to walk a trail: recover scattered pieces, decode the route,
+  open a sealed vault, and re-sow the cultivar bred for the ground where the first planting
+  failed. It tours every kind of landmark the world makes, and the finale changes one place
+  in the world for good. Press **E** at the Archivist (at the base of the Spire) to begin;
+  the campaign runs alongside the errands and Trials without interrupting them.
 - **Day & night** — dawn glow, blazing noon, fireflies, bioluminescent glow-moss, lit
   windows, stars, drifting clouds. After dark the working street lamps throw real pools
   of warm light, and you carry a **flashlight** (F) that lights wherever you look. All

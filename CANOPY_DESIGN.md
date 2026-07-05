@@ -190,3 +190,114 @@ B. Ornaments (awnings, shutters, balconies, murals, chimneys, silos, fences, arc
 Benches, rusted mailboxes, laundry lines between facing windows, puddle quads (dawn
 hours, fade by noon), mushroom clusters on deadwood/rubble, cobweb corner quads in
 arcades, birds' nests on lamp heads, market litter (crates, cloth scraps) near stalls.
+
+---
+
+# Regions — macro map variance
+
+Chunk types and district styles are i.i.d., so beyond ~200 m the world reads the same
+everywhere. Regions overlay a continent-scale field so some quarters are greener, deader,
+or more ruined than others — bands and pockets hundreds of metres wide.
+
+## The field (core.js)
+- `valueNoise2(x, z, salt)` — bilinear interpolation of hashed lattice corners with a
+  smoothstep fade. Allocation-free; deterministic on `hash2` (identical every session).
+- `regionAt(ix, iz)` → `{ verdancy, ruin, biome }`. Two smooth scalars: `verdancy` and
+  `ruin`, each `0.65×`(wavelength-12 octave) `+ 0.35×`(wavelength-5 octave for edge wobble).
+  Thresholds (tuned to a 100×100 window: scorch≈15%, deepgreen≈14%, ashen≈8%):
+  `verdancy < 0.32 → scorch`, `> 0.66 → deepgreen`, else `ruin > 0.66 → ashen`, else `canopy`.
+- `regionBiome(ix, iz)` — the allocation-free biome-string hot path used by
+  `baseChunkType`'s weight remap and by mission/trial ring scans (which call `chunkType`
+  over hundreds of chunks). `regionAt` (returns an object) is called once per chunk build
+  and by the minimap/HUD; it is globally accessible for the campaign's `nearestBiomeChunk`.
+- **Exclusion:** the Spire and Hamlet chunks and their 8 neighbours each clamp to full
+  canopy (`verdancy ≥ 0.45`, `ruin ≤ 0.5`) so the landmark and hidden village never spawn
+  sun-blasted. (`_hamletCell` is wired up once `HAMLET` is computed.)
+
+## Effects (all modulation — no new chunk types or materials)
+`buildChunk` computes `REG = regionAt(ix, iz)` once into module-scoped `CUR_REG` (the same
+pattern as `CUR_STYLE`); builders read it. Leaf tint is a vertex-colour lerp in
+`leafTintByY`; grass in `addGrassTuft`; facades/heights/vines/nests in `addBuilding`.
+- **scorch** ("the canopy failed here"): ~75% of street trees skipped, survivors dead snags
+  or stunted; no bough/weave/crown-nest layers (exposure follows from real shadow rays);
+  olive-tan leaves, straw grass, sun-bleached facades, vines ×0.15, plaza-heavy chunk mix
+  (grove→city), fewer/rustier cars, 2–4 bleached snag trunks. Streets are lethal at noon.
+- **deepgreen** ("the flora won"): tree density ×1.6, bigger, giants ~15% in any chunk type;
+  Weave ≈90%, extra vine ropes, dark-green leaves, glow/fireflies ×1.8; buildings ×0.8
+  height with a raised moss line; grove/park-heavy mix (towers→city); grass through the asphalt.
+- **ashen** ("intact canopy, dead city"): building ruin variant 55%, heights ×0.75, collapsed
+  lots ×2, extra street rubble, working lamps ×0.3, grey-dusted vegetation, ambient NPC target
+  count ×0.5 (entities.js).
+- **canopy** (baseline): micro-drifts with `verdancy` — tree density ±25%, building vine weight ±30%.
+
+## Surface
+- Minimap chunk background keys off biome (tan scorch, deep-green deepgreen, grey-brown ashen).
+- HUD district line appends the biome for non-canopy quarters ("Kettle Rows — the Scorch" /
+  "— the Deep Green" / "— the Ash Quarters").
+- First ground-level entry into a non-canopy biome fires a one-shot mood line (`once('biome-…')`).
+- Dev hook: `?px=&pz=` (SHOT mode only) drops the camera at chosen world coords for screenshots.
+
+---
+
+# The Second Seed — story campaign
+
+A 7-chapter storyline (`story.js`, loaded last) that deliberately tours every kind of
+landmark the world makes — spire, districts, plaza, reservoir, crown nest, fallen tower,
+viaduct, canal, hamlet, sinkhole, and the Scorch — and whose missions are puzzle pieces,
+not fetch quests: shards retrieved in Ch2 become the key to the Ch4 solar puzzle; a riddle
+decodes into a real viaduct span-count; the finale permanently greens one place and relights
+the Spire's beacon. Coexists with errands/Trials: it pauses its marker for them but never
+loses progress. Unlocks after the player has summited the Spire once (`canopy.summited`).
+
+## Architecture
+- Mirrors the Trials house pattern: a `story` state object, a switch in `updateStory(dt, time)`
+  over `story.ch`/`story.phase` (called from the main loop right after `updateTrials`), pure-hash
+  ring-scan finders, a pooled marker set (`STORY_POOL`, ≤6 meshes, gold + green materials), and
+  HUD writers reusing the mission/minimap elements (`✦ CH.3 — THE FLOODED ARCHIVE`).
+- **Objective priority** is trial > errand > story > SPIRE, enforced inside `updateStory` (it
+  writes `activeObjective`/HUD only when no trial or errand is live). Between chapters the ✦
+  points at the Archivist, not the Spire — the campaign is the spine until it's done.
+- **Persistence:** `canopy.story` = `{ v:1, ch, shards, haveKey, haveSeed, planted:{dx,dz}, … }`,
+  bootstrapped **once in core.js** into a `STORY_SAVE` global so worldgen can read planted/complete
+  state before `story.js` runs (chunks build first). `story.js` owns all writes. `planted` is stored
+  spire-relative (offset in chunks) so the grown oasis survives the per-session `SPIRE` re-roll —
+  the same tradeoff HAMLET makes.
+- **The Archivist** (giver NPC, role `'archivist'` in entities.js — trial-master body, dusty-amber
+  cloak, crates/papers): one deterministic anchor at `SPIRE.x+14, SPIRE.z+6`, spawned/culled in a
+  3×3 window like the trial-masters.
+
+## Chapters
+1. **The Dead Broadcast** — climb the Spire; find the nearest oldtown records hall (E).
+2. **Shards of Noon** — three sun-runs (plaza openRect · reservoir roof · crown-nest pad); shards
+   only glint while `dayF > 0.5`. The shards are the Ch4 puzzle pieces.
+3. **The Flooded Archive** — wade a reservoir · reach a fallen-tower ramp top · ride a viaduct
+   deck (untimed checkpoints) to a broken span; sets `rangeBlocks = 4 + hash2(SPIRE.cx,cz,4444)%3`.
+4. **The Heliograph** — set the three shards in sun-clock sockets at the summit; at noon
+   (`dayT ∈ [0.47, 0.57]`) a scene-level emissive beam fires toward the Root Vault sinkhole (nearest
+   sinkhole ring ≥ 5 from the spire); the bearing is derived from the found sinkhole, so the clue is
+   always true. No minimap marker — walk the bearing.
+5. **The Warden's Key** — the Hidden Hamlet (reuses the Rumor waypoints if undiscovered; the Rumor
+   trial then completes with a nod, guarded via `STORY_SAVE.foundHamletViaStory`) · elders · a
+   viaduct×canal crossing, then a canal chase to the key.
+6. **The Root Vault** — return to the vault sinkhole at night; a three-knot order puzzle
+   (dawn = easternmost, dusk = westernmost, water = the other); descend for the Second Seed. Carrying
+   it disables sprint (`storyCarrying`, gated in player.js) and fouls the flashlight (Salvage mechanic).
+7. **The Scorch Bloom** — carry the Seed to the heart of the nearest Scorch region (hill-descend
+   verdancy to a local minimum); hold E to plant (3-second channel); the planted chunk hot-swaps to
+   the **Sapling of the Second Seed** (young giant + glow ring + grass through asphalt, an oasis dot on
+   the minimap). Epilogue: the summit beacon is relit permanently (`buildChunk` checks `storyComplete()`).
+   Reward — **Seedbearer**: the minimap marks anomaly landmarks in loaded chunks.
+
+## Rules & touch points
+- Every finder has a widened-radius fallback; if a scan fails entirely (theoretical), the objective
+  falls back to the Archivist with an apologetic line and retries on next accept — no chapter soft-locks.
+- Ch4→5 and Ch6→7 chain in the field (Archivist lines arrive as an "old voice in your head"); all
+  other transitions return to the Archivist hub.
+- Markers use a separate pool (never fight Trial markers); the heliograph beam is one scene-level mesh,
+  created once, hidden when idle. Finders run only at phase transitions (never per-frame `peekColData`).
+- Touch points outside `story.js` (each marked in-code): index.html (script tag), player.js (E handler
+  story-first + sprint gate), main.js (loop call, minimap oasis/Seedbearer/Archivist dots, `summited`
+  persistence, Rumor-trial guard), entities.js (`'archivist'` role), worldgen (sapling + relit beacon
+  behind cheap `storyPlantedAt`/`storyComplete` guards), core.js (`STORY_SAVE` bootstrap).
+- Dev hook: `?story=N` jumps to chapter N with prerequisites granted (shards/key/seed), used by the
+  smoke tests (`?shot=1&story=N` → READY).
