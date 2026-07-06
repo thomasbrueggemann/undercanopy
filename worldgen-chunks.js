@@ -112,16 +112,51 @@ const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, col
 moonSprite.scale.set(55, 55, 1); moonSprite.renderOrder = -8;
 skyGroup.add(moonSprite);
 
+// Sky-probe scene (core.js): clones share the live dome geometry/material and the sprite
+// materials, so every updateSky recolour propagates for free; only positions need copying
+// at refresh time.
+const domeEnv = new THREE.Mesh(domeGeo, dome.material);
+domeEnv.frustumCulled = false;
+envScene.add(domeEnv);
+const sunEnv = new THREE.Sprite(sunSprite.material);  sunEnv.scale.copy(sunSprite.scale);
+const moonEnv = new THREE.Sprite(moonSprite.material); moonEnv.scale.copy(moonSprite.scale);
+envScene.add(sunEnv); envScene.add(moonEnv);
+
+// Real multi-puff cloud textures (3 seeded variants): 7-12 soft white radial puffs biased
+// to the upper canvas so the base reads flat, plus a few darker puffs along the bottom for
+// a shaded underside. Own mulberry32 per seed — separate from the cloud-spawn rng below.
+function makeCloudTexture(seed) {
+  const W = 256, H = 128, r = mulberry32(seed);
+  const cc = makeCanvas(W, H), xc = cc.getContext('2d');
+  xc.clearRect(0, 0, W, H);
+  const nPuff = 7 + (r() * 6 | 0);
+  for (let i = 0; i < nPuff; i++) {
+    const px = 30 + r() * (W - 60), py = H * (0.12 + r() * 0.48), rr = 26 + r() * 40, a = 0.30 + r() * 0.45;
+    const g = xc.createRadialGradient(px, py, 1, px, py, rr);
+    g.addColorStop(0, `rgba(255,255,255,${a})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    xc.fillStyle = g; xc.beginPath(); xc.arc(px, py, rr, 0, 7); xc.fill();
+  }
+  const nShade = 3 + (r() * 3 | 0);
+  for (let i = 0; i < nShade; i++) {
+    const px = 40 + r() * (W - 80), py = H * (0.66 + r() * 0.3), rr = 20 + r() * 30;
+    const g = xc.createRadialGradient(px, py, 1, px, py, rr);
+    g.addColorStop(0, `rgba(150,160,175,${0.18 + r() * 0.14})`); g.addColorStop(1, 'rgba(150,160,175,0)');
+    xc.fillStyle = g; xc.beginPath(); xc.arc(px, py, rr, 0, 7); xc.fill();
+  }
+  return canvasTex(cc);
+}
+const texClouds = [makeCloudTexture(11), makeCloudTexture(12), makeCloudTexture(13)];
+
 // drifting high clouds
 const clouds = [];
 {
   const rs = mulberry32(31337);
   for (let i = 0; i < 14; i++) {
-    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, transparent: true, opacity: 0.1, fog: false, depthWrite: false }));
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: texClouds[i % 3], transparent: true, opacity: 0.1, fog: false, depthWrite: false }));
     const d = 250 + rs() * 350;
     const a = rs() * Math.PI * 2;
     s.position.set(Math.cos(a) * d, 130 + rs() * 160, Math.sin(a) * d);
-    s.scale.set(180 + rs() * 260, 60 + rs() * 60, 1);
+    s.scale.set(220 + rs() * 300, 70 + rs() * 70, 1);
     s.userData.va = 0.4 + rs() * 0.8;
     skyGroup.add(s); clouds.push(s);
   }
@@ -138,6 +173,7 @@ const SKY = {
 const _top = new THREE.Color(), _hor = new THREE.Color(), _sunC = new THREE.Color(), _fogC = new THREE.Color();
 const sunDir = new THREE.Vector3();
 let dayF = 1, nightF = 0, sunElev = 1, dewF = 0;
+let _envAccum = 0, _envDone = false;   // sky-probe refresh throttle (core.js refreshEnvProbe)
 
 function updateSky(t, dt) {
   const ang = (t - 0.25) * Math.PI * 2;
@@ -192,7 +228,10 @@ function updateSky(t, dt) {
   moonSprite.position.copy(sunDir).multiplyScalar(-690);
   moonSprite.material.opacity = nightF * 0.9;
   stars.material.opacity = nightF * 0.9;
-  for (const cl of clouds) cl.material.opacity = 0.05 + dayF * 0.09;
+  for (const cl of clouds) {
+    cl.material.opacity = 0.06 + dayF * 0.16;
+    cl.material.color.copy(SKY.sunHigh).lerp(_sunC, duskF * 0.75);   // white by day, ember at dusk
+  }
 
   // emissives
   matBld.emissiveIntensity = nightF * 0.9 + duskF * 0.15;
@@ -213,6 +252,16 @@ function updateSky(t, dt) {
   texWater.offset.x += wdt * 0.008; texWater.offset.y += wdt * 0.003;
   texWater2.offset.x -= wdt * 0.005; texWater2.offset.y -= wdt * 0.003;
   matWater.emissiveIntensity = dayF * 0.10;
+
+  // Sky probe refresh: ~1 s cadence (sun moves <1% of the cycle between refreshes).
+  // dt is undefined on the initial synchronous call — force that first refresh.
+  _envAccum += (dt || 0);
+  if (_envAccum >= 1 || !_envDone) {
+    _envAccum = 0; _envDone = true;
+    sunEnv.position.copy(sunSprite.position);
+    moonEnv.position.copy(moonSprite.position);
+    refreshEnvProbe();
+  }
 }
 
 /* ======================================================================== */
@@ -254,7 +303,13 @@ scene.add(sea);
 /*  GROUND                                                                  */
 /* ======================================================================== */
 texGround.repeat.set(80, 80);
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(640, 640), new THREE.MeshStandardMaterial({ map: texGround, roughness: 1, metalness: 0 }));
+texGroundBump.repeat.set(80, 80);
+texGroundRough.repeat.set(80, 80);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(640, 640), new THREE.MeshStandardMaterial({
+  map: texGround, bumpMap: texGroundBump, bumpScale: 0.35,
+  roughnessMap: texGroundRough, roughness: 1, metalness: 0,
+  envMap: envRT.texture, envMapIntensity: 0.3
+}));
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);

@@ -414,6 +414,22 @@ function _wxTint(col, fogAmt, hemiAmt) {
   if (hemiAmt > 0 && typeof hemi !== 'undefined') hemi.color.lerp(col, clamp(hemiAmt, 0, 1));
 }
 
+/* ------------------------------------------------- scripted trigger ---------
+   wxScripted(kind) — a story beat (the Verge Engine's cloud-seed) asks for a named event.
+   Reuses the forced dev path (short warn, grace skipped). Declines cleanly — no side effects,
+   returns false — when a system event is already running (WX.phase !== 'clear') or in SHOT, so
+   the caller can fall back to a purely local effect. Console-logs like the ?wx= hook. */
+function wxScripted(kind) {
+  if (typeof SHOT !== 'undefined' && SHOT) return false;
+  if (kind !== 'dust' && kind !== 'storm' && kind !== 'heat') return false;
+  if (WX.phase !== 'clear') return false;                 // already busy — let the caller fall back
+  _wxForced = true;                                        // short warn; _wxEndToClear clears this flag
+  _wxPending = null;
+  _wxBeginWarn(kind);
+  console.log('WEATHER ' + kind + ' scripted');
+  return true;
+}
+
 /* --------------------------------------------------------- dev hook ---------
    ?wx=dust|storm|heat forces the named event: skip the grace period and drop straight into
    a short warn so the frame changes fast for a headless verifier. Never in SHOT mode. */

@@ -56,6 +56,9 @@ addEventListener('keydown', e => {
     // Ciphers next (story > puzzles > inventory > trial > errand): the Tinker & the five caches.
     // puzzleInteract() returns true if it consumed E.
     else if (typeof puzzleInteract === 'function' && puzzleInteract()) { /* consumed by the Ciphers */ }
+    // The Verge Engine next (story > ciphers > verge > pages > ladders > trial/giver): verge props
+    // are rarer & more positional than pages (design D9). vergeInteract() returns true if it consumed E.
+    else if (typeof vergeInteract === 'function' && vergeInteract()) { /* consumed by the Verge expedition */ }
     // Inventory next: picking up a journal page within reach. Returns true if it consumed E.
     else if (typeof inventoryInteract === 'function' && inventoryInteract()) { /* picked up a journal page */ }
     // Ladders next (after inventory, before the trial-master): latch onto / release a ladder.
@@ -233,7 +236,10 @@ function stepPlayer(dt) {
   const ml = Math.hypot(mx, mz);
   if (ml > 0) { mx /= ml; mz /= ml; }
   // Trials reward: +10% sprint. Second Seed (Part 2, Ch6/7): sprint disabled while carrying the Seed.
-  const carrying = typeof storyCarrying !== 'undefined' && storyCarrying;
+  // carry-props (verge expedition): heavy carried objects (assay castings, machine pieces) also
+  // disable sprint — same gate, set only by the entities.js carry rig (guarded like storyCarrying).
+  const carrying = (typeof storyCarrying !== 'undefined' && storyCarrying) ||
+                   (typeof carryHeavy !== 'undefined' && carryHeavy);
   const sprintF = ((keys.ShiftLeft || keys.ShiftRight) && !carrying) ? SPRINT * (sprintBoost ? 1.1 : 1) : 1;
   let speed = WALK * sprintF * (p.inWater ? 0.35 : 1) * (p.stagger > 0 ? 0.45 : 1);   // wading is slow; a hard landing staggers
   // The Long Rain floods the streets: standing water slows walking at ground level (not in

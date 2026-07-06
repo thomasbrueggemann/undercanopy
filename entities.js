@@ -102,7 +102,7 @@ const npcPaperMat = new THREE.MeshStandardMaterial({ color: 0xcabf9a, roughness:
 // The Tinker (Part 2 Ciphers giver): a coppery apron + a tool-bench of brass gears and a small
 // brazier so she reads at night — distinct on sight from the eight citizens and the Archivist.
 const npcTinkerCloak = new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 1 });
-const npcBrassMat = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.5, metalness: 0.3 });
+const npcBrassMat = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.5, metalness: 0.3, envMap: envRT.texture, envMapIntensity: 0.5 });
 
 const npcs = [];
 function makeNPCGroup(kid, role) {
@@ -1094,5 +1094,186 @@ function updateVignettes(dt, time) {
   updateSwing(dt, time);
   updateDrips(dt);
   updateBanners(dt, time);
+}
+
+/* ======================================================================== */
+/*  CARRY-PROPS — the shared collectible language (add-verge-engine-expedition) */
+/*  Two halves, both living here where the NPC/prop rigs do:                   */
+/*    (a) an animated WORLD-PICKUP pool (bob + slow spin + a pulsing texSoft    */
+/*        glint) that reads a piece across a plaza, plus a one-shot pickupBurst; */
+/*    (b) a first-person CARRY RIG parented to the camera (lower-right) showing  */
+/*        one carried object at a time, with a walk-bob sway (deeper for heavy). */
+/*  Consumers: errand parcels (main.js) and every verge item (verge.js). All of */
+/*  it is inert in SHOT (nothing shown, no audio) and hidden while the satchel   */
+/*  panel is open. carryHeavy (var, cross-file like storyCarrying) is set ONLY    */
+/*  by this API and read by player.js to gate sprint. No worldgen touched — the   */
+/*  pools are pre-allocated hidden meshes, drawn per-frame for nearby candidates. */
+/* ======================================================================== */
+var carryHeavy = false;   // var: read by player.js (cross-file, storyCarrying precedent). Set only here.
+
+// --- shared materials (brass house style; distinct from the NPC brass so tinting is free) ---
+const cpBrass = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.5, metalness: 0.35, envMap: envRT.texture, envMapIntensity: 0.5 });
+const cpBrassLt = new THREE.MeshStandardMaterial({ color: 0xc4a55e, roughness: 0.45, metalness: 0.4, envMap: envRT.texture, envMapIntensity: 0.5 });
+const cpIron = new THREE.MeshStandardMaterial({ color: 0x2b2c24, roughness: 0.8, metalness: 0.2 });
+const cpGlass = new THREE.MeshStandardMaterial({ color: 0x9fc6c0, roughness: 0.3, metalness: 0.1, emissive: srgb(0x2a4a44), emissiveIntensity: 0.3, envMap: envRT.texture, envMapIntensity: 0.8 });
+const cpWax = new THREE.MeshStandardMaterial({ color: 0xe7dcc0, roughness: 0.9, metalness: 0 });
+
+/* ---- (a) WORLD PICKUP POOL ------------------------------------------------
+   8 slots. Each slot is a small brass cluster (a blob core + a box facet) plus a
+   texSoft glow sprite, so an uncollected piece bobs, spins, and pulses a glint. A
+   caller (verge.js) does pickupBegin() → pickupShow(x,y,z,kind,time) per visible
+   candidate → pickupEnd(); the slots left unused this frame are hidden. Never in SHOT. */
+const PICKUP_N = 8;
+const PICKUP_TINT = {   // per-kind cluster tint (reads at range; not load-bearing)
+  flywheel: 0x8a6a2e, governor: 0xb08a3a, windrose: 0x9fc6c0, escapement: 0xc4a55e,
+  coil: 0x9a7b3a, censer: 0xb99a6a, timetable: 0xd8cf9a, generic: 0x9a7b3a
+};
+const PICKUP_POOL = Array.from({ length: PICKUP_N }, () => {
+  const g = new THREE.Group();
+  const core = new THREE.Mesh(tplBlob, cpBrass); core.scale.setScalar(0.26);
+  const facet = new THREE.Mesh(tplBox, cpBrassLt); facet.scale.set(0.34, 0.14, 0.34); facet.position.y = 0.0;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, color: 0xffe9a8, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+  spr.scale.setScalar(1.4);
+  g.add(core, facet, spr); g.visible = false; scene.add(g);
+  return { g, core, facet, spr };
+});
+let _pickN = 0;
+function pickupBegin() { _pickN = 0; }
+function pickupShow(x, y, z, kind, time) {
+  if (SHOT) return;
+  const s = PICKUP_POOL[_pickN++]; if (!s) return;
+  const bob = Math.sin((time || 0) * 1.9 + x * 0.7) * 0.09;
+  s.g.position.set(x, y + 0.4 + bob, z);
+  s.g.rotation.y = (time || 0) * 0.7;
+  const tint = PICKUP_TINT[kind] || PICKUP_TINT.generic;
+  // shared materials stay untinted (mutating them would recolor every slot); the glint
+  // sprite carries the per-kind tint so a piece still reads across a plaza.
+  s.core.material = (kind === 'windrose') ? cpGlass : cpBrass;
+  s.facet.material = cpBrassLt;
+  const pulse = 0.42 + 0.28 * (0.5 + 0.5 * Math.sin((time || 0) * 3.1 + z));
+  s.spr.material.opacity = pulse;
+  s.spr.material.color.setHex(tint);
+  s.spr.scale.setScalar(1.25 + 0.35 * Math.sin((time || 0) * 3.1 + z));
+  s.g.visible = true;
+}
+function pickupEnd() { for (let i = _pickN; i < PICKUP_N; i++) PICKUP_POOL[i].g.visible = false; }
+
+// --- burst: a brief scale-pop sprite + a chime arpeggio (sfxNote, AC-gated) on collection ---
+const BURST_N = 4;
+const BURST_POOL = Array.from({ length: BURST_N }, () => {
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, color: 0xffe9a8, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+  spr.scale.setScalar(0.1); spr.visible = false; scene.add(spr);
+  return { spr, t: 0, life: 0 };
+});
+function pickupBurst(x, y, z) {
+  if (SHOT) return;
+  const b = BURST_POOL.find(b => b.life <= 0) || BURST_POOL[0];
+  b.spr.position.set(x, y + 0.5, z); b.t = 0; b.life = 0.25; b.spr.visible = true;
+  // chime arpeggio — reuse the Ciphers' sfxNote (loaded before us at runtime), AC-gated inside.
+  if (typeof sfxNote === 'function') { sfxNote(659.25, 0.35, 0.06); setTimeout(() => sfxNote(783.99, 0.35, 0.06), 70); setTimeout(() => sfxNote(1046.5, 0.5, 0.06), 150); }
+}
+function updateBursts(dt) {
+  for (const b of BURST_POOL) {
+    if (b.life <= 0) continue;
+    b.t += dt; const u = Math.min(1, b.t / 0.25);
+    b.spr.scale.setScalar(0.4 + u * 2.6);
+    b.spr.material.opacity = 0.8 * (1 - u);
+    if (u >= 1) { b.life = 0; b.spr.visible = false; }
+  }
+}
+
+/* ---- (b) FIRST-PERSON CARRY RIG -------------------------------------------
+   One Group parented to the camera, lower-right. Per-kind child clusters (built once,
+   hidden); carryShow(kind) reveals exactly one and sets carryHeavy for the heavy kinds
+   (assay casting + the five machine pieces). Walk-bob sway from player.bob; hidden in
+   SHOT and while the satchel is open. Machine pieces ride here from the solve site until
+   seated at the Gate — the walk home is the reward lap (design D7). */
+const carryRig = new THREE.Group();
+carryRig.position.set(0.34, -0.30, -0.78);   // camera space: -Z forward, lower-right
+carryRig.visible = false;
+camera.add(carryRig);
+const _carryKinds = {};
+function _cpAdd(group, geo, mat, sx, sy, sz, px, py, pz, rx, ry, rz) {
+  const m = new THREE.Mesh(geo, mat); m.scale.set(sx, sy, sz);
+  m.position.set(px || 0, py || 0, pz || 0); m.rotation.set(rx || 0, ry || 0, rz || 0);
+  group.add(m); return m;
+}
+function _cpKind(name, build) { const g = new THREE.Group(); g.visible = false; build(g); carryRig.add(g); _carryKinds[name] = g; }
+
+// parcel — a waxcloth box tied with a cord (reuses the NPC paper/wood look)
+_cpKind('parcel', g => { _cpAdd(g, tplBox, npcPaperMat, 0.20, 0.15, 0.15); _cpAdd(g, tplBox, npcWoodMat, 0.215, 0.02, 0.03, 0, 0.075, 0); _cpAdd(g, tplBox, npcWoodMat, 0.03, 0.02, 0.16, 0, 0.075, 0); });
+// taper — a slim wax stick with a live flame sprite at the tip (burn-down via carrySetBurn)
+let _cpTaperStick = null, _cpTaperFlame = null;
+_cpKind('taper', g => {
+  _cpTaperStick = _cpAdd(g, tplCyl, cpWax, 0.018, 0.26, 0.018, 0, 0, 0);
+  const fl = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, color: 0xffb347, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+  fl.scale.setScalar(0.09); fl.position.set(0, 0.29, 0); g.add(fl); _cpTaperFlame = fl;
+});
+// assay casting — a heavy brass ingot silhouette
+_cpKind('casting', g => { _cpAdd(g, tplBox, cpBrass, 0.22, 0.12, 0.16); _cpAdd(g, tplBox, cpBrassLt, 0.10, 0.06, 0.10, 0, 0.09, 0); });
+// the five machine pieces — distinct 2–3-mesh brass clusters
+_cpKind('governor', g => {   // flyball governor: a spindle + two arms with balls
+  _cpAdd(g, tplCyl, cpBrass, 0.03, 0.24, 0.03);
+  _cpAdd(g, tplBox, cpBrassLt, 0.22, 0.02, 0.02, 0, 0.18, 0, 0, 0, 0.5);
+  _cpAdd(g, tplBlob, cpBrass, 0.05, 0.05, 0.05, 0.09, 0.13, 0); _cpAdd(g, tplBlob, cpBrass, 0.05, 0.05, 0.05, -0.09, 0.13, 0);
+});
+_cpKind('windrose', g => {   // compass rose: a glass disc + crossed brass vanes
+  _cpAdd(g, tplCyl, cpGlass, 0.14, 0.02, 0.14, 0, 0.09, 0, Math.PI / 2, 0, 0);
+  _cpAdd(g, tplBox, cpBrassLt, 0.26, 0.015, 0.03, 0, 0.1, 0); _cpAdd(g, tplBox, cpBrassLt, 0.03, 0.015, 0.26, 0, 0.1, 0);
+});
+_cpKind('escapement', g => {   // gear + pallet fork
+  _cpAdd(g, tplWheel, cpBrass, 0.16, 0.16, 0.03, 0, 0.09, 0);
+  _cpAdd(g, tplBox, cpIron, 0.03, 0.16, 0.02, 0.02, 0.14, 0.02, 0, 0, 0.3);
+});
+_cpKind('coil', g => {   // condenser coil: stacked brass rings on a core
+  _cpAdd(g, tplCyl, cpIron, 0.03, 0.26, 0.03);
+  for (let i = 0; i < 4; i++) _cpAdd(g, tplWheel, cpBrass, 0.11, 0.11, 0.02, 0, 0.03 + i * 0.06, 0);
+});
+_cpKind('censer', g => {   // cloud-seed censer: a hanging bowl + lid + a wisp
+  _cpAdd(g, tplBlob, cpBrass, 0.13, 0.09, 0.13, 0, 0.06, 0);
+  _cpAdd(g, tplCyl, cpBrassLt, 0.06, 0.05, 0.06, 0, 0.13, 0);
+  const wisp = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, color: 0xbfe8d8, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+  wisp.scale.setScalar(0.11); wisp.position.set(0, 0.22, 0); g.add(wisp);
+});
+
+const CARRY_HEAVY_KINDS = { casting: 1, governor: 1, windrose: 1, escapement: 1, coil: 1, censer: 1 };
+let _carryKind = null;
+function carryShow(kind) {
+  if (!_carryKinds[kind]) return;
+  for (const k in _carryKinds) _carryKinds[k].visible = (k === kind);
+  _carryKind = kind;
+  carryHeavy = !!CARRY_HEAVY_KINDS[kind];
+}
+function carryHide() {
+  _carryKind = null; carryHeavy = false;
+  for (const k in _carryKinds) _carryKinds[k].visible = false;
+}
+function carryKind() { return _carryKind; }
+// taper burn-down: shrink the stick and dim the flame as frac→0 (verge.js drives it each frame).
+function carrySetBurn(frac) {
+  if (!_cpTaperStick) return;
+  const f = clamp(frac, 0, 1);
+  _cpTaperStick.scale.y = 0.10 + 0.16 * f;
+  _cpTaperStick.position.y = 0;
+  if (_cpTaperFlame) { _cpTaperFlame.position.y = 0.03 + 0.26 * f; }
+}
+
+// One per-frame driver (main loop, all modes — cheap; self-gates SHOT/satchel). Sway the rig
+// from the walk bob (deeper for heavy kinds), flicker the taper flame, and age the bursts.
+function updateCarry(dt, time) {
+  updateBursts(dt);
+  const open = (typeof satchelOpen !== 'undefined' && satchelOpen);
+  if (SHOT || open || !_carryKind) { carryRig.visible = false; return; }
+  carryRig.visible = true;
+  const heavy = !!CARRY_HEAVY_KINDS[_carryKind];
+  const bob = (typeof player !== 'undefined' && player.bob) ? player.bob : time * 2;
+  const amp = heavy ? 0.05 : 0.028;
+  carryRig.position.set(0.34 + Math.sin(bob) * amp * 0.6, -0.30 + Math.abs(Math.sin(bob)) * -amp, -0.78);
+  carryRig.rotation.set(Math.sin(bob) * (heavy ? 0.06 : 0.03), Math.cos(bob * 0.5) * 0.02, Math.sin(bob) * (heavy ? 0.05 : 0.025));
+  if (_carryKind === 'taper' && _cpTaperFlame) {
+    const fl = 0.075 + Math.abs(Math.sin(time * 11)) * 0.03 + Math.sin(time * 23) * 0.01;
+    _cpTaperFlame.scale.setScalar(fl);
+    _cpTaperFlame.material.opacity = 0.75 + 0.2 * Math.sin(time * 17);
+  }
 }
 

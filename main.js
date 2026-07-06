@@ -3,7 +3,7 @@
 /* ======================================================================== */
 /*  MISSIONS — small errands the under-dwellers ask of you                  */
 /* ======================================================================== */
-const ARCH = { VANTAGE: 'vantage', SUNRUN: 'sun-run', LAMP: 'lamplighter', ERRAND: 'errand' };
+const ARCH = { VANTAGE: 'vantage', SUNRUN: 'sun-run', LAMP: 'lamplighter', ERRAND: 'errand', LEAD: 'lead' };
 let activeMission = null;         // the one accepted mission, or null
 let activeObjective = SPIRE;      // where the minimap ✦ points (the Spire until a mission overrides)
 let giver = null;                 // an NPC promoted to mission-giver (pre-accept only), or null
@@ -97,6 +97,13 @@ function pickArch() {
   if (dayF > 0.4 && (nearestOpenRect() || nearestRooftop(26))) opts.push(ARCH.SUNRUN);
   if (nearestRooftop(26) || nearestGiantTrunk()) opts.push(ARCH.VANTAGE);
   if (isDusk() && brokenLamps(3).length >= 3) opts.push(ARCH.LAMP);
+  // LEAD (verge.js): route givers into the contraption hunt while the Engine is unfinished and at
+  // least one located site is still unsolved. Weighted ~3 so a giver often carries a rumor. All
+  // typeof-guarded so main.js runs unchanged if verge.js is absent; never offered once the Gate is done.
+  if (typeof vergeUnfinished === 'function' && vergeUnfinished() &&
+      typeof vergeUnsolvedSites === 'function' && vergeUnsolvedSites().length) {
+    opts.push(ARCH.LEAD, ARCH.LEAD, ARCH.LEAD);
+  }
   opts.push(ARCH.ERRAND);                                // always possible
   return opts[(Math.random() * opts.length) | 0];
 }
@@ -113,6 +120,8 @@ function acceptMission(arch) {
     const d = errandDistrict();
     m.arch = ARCH.ERRAND; m.target = { x: d.x, z: d.z, y: 0 }; m.district = d.name;
     m.title = 'Carry the parcel to ' + d.name;
+    // carry-props: the parcel becomes a visible first-person carried prop until the handoff.
+    if (typeof carryShow === 'function') carryShow('parcel');
     msg('A woman folds a parcel in waxcloth: “Take this to my sister in ' + d.name + '. She’ll be watching the road.”', 7);
   };
   if (arch === ARCH.VANTAGE) {
@@ -149,6 +158,22 @@ function acceptMission(arch) {
       m.title = 'Wake the dark lamps';
       msg('An out-of-oil lamplighter grips your arm: “Dusk’s nearly gone. Wake the dead lamps down the row before true night.”', 7);
     }
+  } else if (arch === ARCH.LEAD) {
+    // A rumor pointing at the nearest unsolved contraption site. No timer, no fail; completed when
+    // verge.js reports the piece collected (vergeLeadSolved). Falls back to an errand if the hunt
+    // is somehow finished between offer and accept.
+    const near = (typeof vergeNearestUnsolved === 'function') ? vergeNearestUnsolved(player.pos.x, player.pos.z) : null;
+    if (!near) buildErrand();
+    else {
+      m.target = { x: near.x, z: near.z, y: 0 }; m.leadSite = near.id; m.district = near.name;
+      m.title = 'Follow the lead — ' + near.name;
+      let line = near.rumor || 'Someone speaks of an old Authority machine out that way, and something locked inside it.';
+      if (typeof vergeLeadIntroNeeded === 'function' && vergeLeadIntroNeeded()) {
+        line += ' They add, lower: “There’s a keeper at the forest’s burnt edge — the Edgewright — who’ll want whatever you pull from it.”';
+        if (typeof vergeMarkLeadIntro === 'function') vergeMarkLeadIntro();
+      }
+      msg(line, 10);
+    }
   } else {
     buildErrand();
   }
@@ -161,6 +186,8 @@ function acceptMission(arch) {
 function clearMissionMeshes() {
   for (const mm of LAMP_POOL) mm.visible = false;
   if (activeMission && activeMission.receiver) { scene.remove(activeMission.receiver.g); activeMission.receiver = null; }   // only if the errand ended WITHOUT delivery (fail/abandon); a delivered receiver is nulled first
+  // carry-props: a parcel-carrying errand ending without a handoff (fail/abandon) drops its prop.
+  if (activeMission && activeMission.arch === ARCH.ERRAND && typeof carryHide === 'function') carryHide();
 }
 function completeMission(goldLine) {
   if (goldLine) msg(goldLine, 9, true);
@@ -177,11 +204,21 @@ function failMission(line) {
   giverCd = 8 + Math.random() * 6;
   updateMissionHUD();
 }
+// Called from verge.js (vergeCollectPiece) when a contraption site gives up its movement. Completes
+// an active LEAD pointing at that site — a giver-credit reward, no timer, no fail. Abandoning a LEAD
+// (e.g. for a trial) never touches verge progress: clearMissionMeshes leaves the hunt state alone.
+function vergeLeadSolved(siteId) {
+  if (activeMission && activeMission.arch === ARCH.LEAD && activeMission.leadSite === siteId) {
+    const name = (typeof vergeSiteName === 'function') ? vergeSiteName(siteId) : 'the site';
+    completeMission('The lead ran true — ' + name + ' gave up its movement. Word of a warden who mends the old machines travels ahead of you now.');
+  }
+}
 
 function missionProgText() {
   const m = activeMission;
   if (!m) return '';
   if (m.arch === ARCH.LAMP) return 'Lamps woken ' + m.litN + ' / ' + m.needN;
+  if (m.arch === ARCH.LEAD) return (typeof vergeSiteProgress === 'function') ? vergeSiteProgress(m.leadSite) : 'Follow the lead';
   if (m.arch === ARCH.SUNRUN) return m.stage === 'out' ? 'Reach the cache' : 'Get back to shade';
   if (m.arch === ARCH.VANTAGE) return 'Climb to the top';
   if (m.arch === ARCH.ERRAND) return 'Deliver in ' + m.district;
@@ -268,7 +305,9 @@ function updateMissions(dt, time) {
     if (d < 4 && m.receiver) {
       // Deliveries: hand her off to the live NPC crowd as a 'depart' walker (takes parcel, jogs away).
       // Null m.receiver first so completeMission→clearMissionMeshes can't remove the now-departing NPC.
+      // carry-props: hide the player's carried parcel as she takes it — the prop transfers visually.
       if (typeof departReceiver === 'function') { departReceiver(m.receiver); m.receiver = null; }
+      if (typeof carryHide === 'function') carryHide();
       completeMission('Delivered. Her sister folds a sprig of glow-moss into your palm — “safe roads, wanderer.”');
     }
   }
@@ -862,6 +901,22 @@ function drawMinimap() {
     mmx.fillStyle = '#e0a05a';
     mmx.beginPath(); mmx.arc(ciphTinker.g.position.x - px, ciphTinker.g.position.z - pz, 3, 0, 7); mmx.fill();
   }
+  // The Verge Gate (verge.js) — revealed after the second machine piece; a bright rune at the
+  // forest's edge (a solid beacon once the Engine is woken). Never a solution marker for the
+  // contraption sites themselves — those stay marker-less, the LEAD objective aside.
+  if (typeof vergeGatePos === 'function') {
+    const gp = vergeGatePos();
+    const shown = (typeof vergeGateReady === 'function' && vergeGateReady()) || (typeof VERGE_SAVE !== 'undefined' && VERGE_SAVE.gateDone && VERGE_SAVE.gateRevealed);
+    if (gp && shown) {
+      const gdx = gp.x - px, gdz = gp.z - pz;
+      if (Math.abs(gdx) < 190 && Math.abs(gdz) < 190) {
+        const done = (typeof VERGE_SAVE !== 'undefined' && VERGE_SAVE.gateDone);
+        mmx.fillStyle = done ? '#8affd0' : '#c9a0ff';
+        mmx.beginPath(); mmx.arc(gdx, gdz, 3.4, 0, 7); mmx.fill();
+        if (done) { mmx.fillStyle = 'rgba(138,255,208,0.30)'; mmx.beginPath(); mmx.arc(gdx, gdz, 7, 0, 7); mmx.fill(); }
+      }
+    }
+  }
   // Gardener's Mantle reward: faint oddity ticks (fern circles, chime poles) on resident chunks —
   // the world opens up for the collector. Cheap: reads already-built colData only.
   if (typeof ciphMantle !== 'undefined' && ciphMantle) {
@@ -1288,6 +1343,7 @@ function loop() {
   if (active) syncHamletResidents(dt);   // Hidden Hamlet residents (spawn near / cull far)
   if (active) updateAnimals(dt, time);   // "The Returned" — ambient wildlife
   if (active) updateVignettes(dt, time); // Life pass — smoke, scraps, swinging lanterns, drips, banners
+  if (active && typeof updateCarry === 'function') updateCarry(dt, time);   // carry-props: first-person carry-rig sway + pickup bursts (self-gates SHOT/satchel)
 
   let air = 30;
   if (active) air = stepHeat(dt);
@@ -1364,6 +1420,9 @@ function loop() {
     // The Gardeners' Ciphers (Part 2): the Tinker, the five caches, the vault. After inventory so
     // its props/hints sit atop the frame; never in SHOT (no Tinker, no props, no updates).
     if (!SHOT && typeof updatePuzzles === 'function') updatePuzzles(dt, time);
+    // The Verge Engine expedition (verge.js): the five contraption sites, the Edgewright, the Gate.
+    // After the Ciphers so its props/hints sit atop the frame; never in SHOT (fully inert).
+    if (!SHOT && typeof updateVerge === 'function') updateVerge(dt, time);
 
     // abandon a trial by holding G (hint given in the start message) — never soft-locks
     if (trial) {

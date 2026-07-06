@@ -138,6 +138,23 @@ renderer.toneMappingExposure = 1.45;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
+// Sky-reflection probe: a tiny cubemap of the procedural sky, re-rendered as the day
+// cycle moves, so water / puddles / window glass / brass pick up real sky+sun
+// reflections. envScene holds lightweight clones of the sky dome and sun/moon sprites
+// (populated in worldgen-chunks.js once those exist); refreshEnvProbe() is throttled
+// from updateSky. Per-material envMap assignment (not scene.environment) so matte
+// batched geometry keeps its current look.
+const envRT = new THREE.WebGLCubeRenderTarget(64);
+const envCam = new THREE.CubeCamera(1, 900, envRT);
+const envScene = new THREE.Scene();
+function refreshEnvProbe() {
+  const tm = renderer.toneMapping;
+  renderer.toneMapping = THREE.NoToneMapping;   // don't double-tonemap the reflection
+  envCam.update(renderer, envScene);
+  renderer.toneMapping = tm;
+  envRT.texture.needsPMREMUpdate = true;        // r152: re-filter the cubeUV copy PBR materials sample
+}
+
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x88a37c, 18, 215);
 // near/far ratio drives depth-buffer precision. The old 0.1/1200 (12000:1) starved
@@ -157,7 +174,9 @@ addEventListener('resize', () => {
 /* ------------------------------------------------------------- lighting -- */
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+// 2048 over the 150 m ortho span is ~7 cm/texel; 4096 halves that where the GPU allows.
+const shadowRes = renderer.capabilities.maxTextureSize >= 8192 ? 4096 : 2048;
+sun.shadow.mapSize.set(shadowRes, shadowRes);
 sun.shadow.camera.left = -75; sun.shadow.camera.right = 75;
 sun.shadow.camera.top = 75; sun.shadow.camera.bottom = -75;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 420;
@@ -206,6 +225,14 @@ function canvasTex(c, repeat) {
   t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
   return t;
 }
+// Roughness / bump data are raw scalars, not colour — they must NOT be sRGB-decoded.
+function canvasTexLinear(c) {
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  if ('colorSpace' in t) t.colorSpace = THREE.NoColorSpace; else t.encoding = THREE.LinearEncoding;
+  t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return t;
+}
 
 // Building facade + matching emissive (lit windows) atlas.
 // An 8×8 grid of window cells; the map/emissive repeat is set to 1/BLD_CELLS so that
@@ -226,6 +253,13 @@ function makeBuildingTextures() {
   const c = makeCanvas(S, S), x = c.getContext('2d');
   const e = makeCanvas(S, S), y = e.getContext('2d');
   y.fillStyle = '#000'; y.fillRect(0, 0, S, S);
+  // Micro-surface maps are drawn from RECORDED window rects after the cell loop, never by
+  // interleaving fresh r() calls — the facade rng stream (and thus every layout) is unchanged.
+  const cRough = makeCanvas(S, S), xr = cRough.getContext('2d');
+  const cBump = makeCanvas(S, S), xb = cBump.getContext('2d');
+  xr.fillStyle = '#dcdcdc'; xr.fillRect(0, 0, S, S);   // concrete ≈ 0.86 rough everywhere
+  xb.fillStyle = '#808080'; xb.fillRect(0, 0, S, S);   // bump mid-grey = flat wall
+  const panes = [], rails = [];
   // concrete base: vertical gradient + large soft mottling (patchy discoloration)
   const g = x.createLinearGradient(0, 0, 0, S);
   g.addColorStop(0, '#918f84'); g.addColorStop(1, '#787468');
@@ -289,6 +323,7 @@ function makeBuildingTextures() {
   ];
   // one glazed pane, drawn to both the albedo (x) and emissive (y) canvases
   function pane(wx, wy, ww, wh, state) {
+    panes.push({ wx, wy, ww, wh, state });   // replayed onto rough/bump maps below
     // recessed reveal: dark surround, deepest at the top (glass sits back from the wall)
     x.fillStyle = 'rgba(30,30,26,0.55)'; x.fillRect(wx - 7, wy - 7, ww + 14, wh + 14);
     x.fillStyle = '#4c4a42'; x.fillRect(wx - 4, wy - 4, ww + 8, wh + 8);          // frame
@@ -371,6 +406,7 @@ function makeBuildingTextures() {
       if (col.bal) {                                                              // balcony rail across the bay
         x.fillStyle = 'rgba(35,38,32,0.8)'; x.fillRect(px + 8, py + WY + WH + 12, cell - 16, 5);
         for (let b = 0; b < 7; b++) x.fillRect(px + 12 + b * (cell - 24) / 6, py + WY + WH + 12, 2, 13);
+        rails.push({ rx: px + 8, ry: py + WY + WH + 12, rw: cell - 16, rh: 5 });
       }
     }
     // creeping moss at some cell bottoms
@@ -382,6 +418,19 @@ function makeBuildingTextures() {
       }
     }
   }
+  // Replay the recorded window rects onto rough/bump: frame → glass keeps the layout in
+  // lockstep with the albedo without touching r(). Glass reads smooth (dark = low rough)
+  // so it alone catches the probe + sun; the reveal/frame/glass step gives raking relief.
+  for (const p of panes) {
+    xr.fillStyle = '#a0a0a0'; xr.fillRect(p.wx - 4, p.wy - 4, p.ww + 8, p.wh + 8);           // matte frame
+    xr.fillStyle = p.state === 'broken' ? '#c8c8c8' : '#2e2e2e';                             // glass gone vs smooth glass
+    xr.fillRect(p.wx, p.wy, p.ww, p.wh);
+    xb.fillStyle = '#4a4a4a'; xb.fillRect(p.wx - 7, p.wy - 7, p.ww + 14, p.wh + 14);         // recessed reveal
+    xb.fillStyle = '#666'; xb.fillRect(p.wx - 4, p.wy - 4, p.ww + 8, p.wh + 8);              // frame
+    xb.fillStyle = '#3a3a3a'; xb.fillRect(p.wx, p.wy, p.ww, p.wh);                           // glass deepest
+    xb.fillStyle = '#b0b0b0'; xb.fillRect(p.wx - 8, p.wy + p.wh + 6, p.ww + 16, 2);          // proud sill
+  }
+  for (const rl of rails) { xb.fillStyle = '#a0a0a0'; xb.fillRect(rl.rx, rl.ry, rl.rw, rl.rh); }
   // storey slab bands across every floor line: light worn top edge + shadow below.
   // Drawn LAST so they sit over grime/streaks like a real projecting slab edge.
   for (let cy = 0; cy <= BLD_CELLS; cy++) {
@@ -389,21 +438,36 @@ function makeBuildingTextures() {
     x.fillStyle = 'rgba(205,200,184,0.34)'; x.fillRect(0, by, S, 3);
     x.fillStyle = 'rgba(28,28,24,0.4)'; x.fillRect(0, by + 3, S, 5);
     x.fillStyle = 'rgba(28,28,24,0.14)'; x.fillRect(0, by + 8, S, 5);
+    xr.fillStyle = '#c4c4c4'; xr.fillRect(0, by, S, 3);        // worn-smooth slab top edge
+    xb.fillStyle = '#c0c0c0'; xb.fillRect(0, by, S, 3);        // proud slab lip
+    xb.fillStyle = '#606060'; xb.fillRect(0, by + 3, S, 3);    // shadow groove just below (sells the relief)
   }
   // faint panel joints between bays
   for (let cx2 = 0; cx2 < BLD_CELLS; cx2++) {
     x.fillStyle = 'rgba(30,30,26,0.16)'; x.fillRect(cx2 * cell, 0, 2, S);
+    xb.fillStyle = '#5a5a5a'; xb.fillRect(cx2 * cell, 0, 2, S);   // recessed panel joint
   }
   const map = canvasTex(c), emissive = canvasTex(e);
+  const rough = canvasTexLinear(cRough), bump = canvasTexLinear(cBump);
+  // r152 shares one uv transform (taken from map) across these maps; set all four anyway.
   map.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
   emissive.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
-  return { map, emissive };
+  rough.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  bump.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  return { map, emissive, rough, bump };
 }
 
 function makeGroundTexture() {
   const S = 512, r = mulberry32(77);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.fillStyle = '#4e4d46'; x.fillRect(0, 0, S, S);
+  // Bump/rough are replayed from recorded marks after the albedo is drawn — no extra r()
+  // calls, so the ground layout is unchanged.
+  const cRough = makeCanvas(S, S), xr = cRough.getContext('2d');
+  const cBump = makeCanvas(S, S), xb = cBump.getContext('2d');
+  xr.fillStyle = '#e0e0e0'; xr.fillRect(0, 0, S, S);   // ground mostly rough
+  xb.fillStyle = '#808080'; xb.fillRect(0, 0, S, S);
+  const stains = [], cracks = [], moss = [];
   // large-scale tonal patches first — worn ground is blotchy before it is grainy
   for (let i = 0; i < 40; i++) {
     const mx = r() * S, my = r() * S, mr = 40 + r() * 140;
@@ -417,17 +481,20 @@ function makeGroundTexture() {
     x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.05)';
     x.fillRect(r() * S, r() * S, 2, 2);
   }
-  // old oil / damp stains
+  // old oil / damp stains (r() order preserved exactly; values hoisted so they can be replayed)
   for (let i = 0; i < 8; i++) {
-    x.fillStyle = `rgba(18,18,20,${0.1 + r() * 0.12})`;
-    x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
-    x.beginPath(); x.ellipse(0, 0, 10 + r() * 26, 6 + r() * 14, 0, 0, 7); x.fill(); x.restore();
+    const alpha = 0.1 + r() * 0.12, sx = r() * S, sy = r() * S, rot = r() * 7, ex = 10 + r() * 26, ey = 6 + r() * 14;
+    x.fillStyle = `rgba(18,18,20,${alpha})`;
+    x.save(); x.translate(sx, sy); x.rotate(rot);
+    x.beginPath(); x.ellipse(0, 0, ex, ey, 0, 0, 7); x.fill(); x.restore();
+    stains.push({ sx, sy, rot, ex, ey });
   }
   // cracks: a pale worn edge beside each dark line makes them read as depth
   for (let i = 0; i < 26; i++) {
     let px = r() * S, py = r() * S;
     const pts = [[px, py]];
     for (let k = 0; k < 6; k++) { px += (r() - 0.5) * 90; py += (r() - 0.5) * 90; pts.push([px, py]); }
+    cracks.push(pts);
     x.strokeStyle = 'rgba(150,146,130,0.3)'; x.lineWidth = 3;
     x.beginPath(); x.moveTo(pts[0][0] + 1, pts[0][1] + 1);
     for (const p of pts) x.lineTo(p[0] + 1, p[1] + 1); x.stroke();
@@ -444,6 +511,7 @@ function makeGroundTexture() {
   // moss blotches
   for (let i = 0; i < 90; i++) {
     const mr = 8 + r() * 42, mx = r() * S, my = r() * S;
+    moss.push({ mx, my, mr });
     const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
     const gcol = `${55 + r() * 30 | 0},${85 + r() * 45 | 0},${35 + r() * 20 | 0}`;
     gg.addColorStop(0, `rgba(${gcol},${0.30 + r() * 0.25})`);
@@ -456,8 +524,28 @@ function makeGroundTexture() {
     x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
     x.fillRect(0, 0, 3 + r() * 4, 2 + r() * 2); x.restore();
   }
-  const t = canvasTex(c); t.repeat.set(1, 1);
-  return t;
+  // Micro-surface replay (deterministic, no r()): damp/oil stains turn smooth so they sheen
+  // at low sun; cracks + stains recess in bump; moss reads a touch rougher and proud.
+  for (const st of stains) {
+    xr.save(); xr.translate(st.sx, st.sy); xr.rotate(st.rot);
+    xr.fillStyle = '#484848'; xr.beginPath(); xr.ellipse(0, 0, st.ex, st.ey, 0, 0, 7); xr.fill(); xr.restore();
+    xb.save(); xb.translate(st.sx, st.sy); xb.rotate(st.rot);
+    xb.fillStyle = '#707070'; xb.beginPath(); xb.ellipse(0, 0, st.ex, st.ey, 0, 0, 7); xb.fill(); xb.restore();
+  }
+  xb.strokeStyle = '#4c4c4c'; xb.lineWidth = 2;
+  for (const pts of cracks) {
+    xb.beginPath(); xb.moveTo(pts[0][0], pts[0][1]);
+    for (const p of pts) xb.lineTo(p[0], p[1]);
+    xb.stroke();
+  }
+  for (const m of moss) {
+    xr.fillStyle = '#f0f0f0'; xr.beginPath(); xr.arc(m.mx, m.my, m.mr, 0, 7); xr.fill();
+    xb.fillStyle = '#8e8e8e'; xb.beginPath(); xb.arc(m.mx, m.my, m.mr, 0, 7); xb.fill();
+  }
+  const map = canvasTex(c); map.repeat.set(1, 1);
+  const bump = canvasTexLinear(cBump); bump.repeat.set(1, 1);
+  const rough = canvasTexLinear(cRough); rough.repeat.set(1, 1);
+  return { map, bump, rough };
 }
 
 function makeLeafTexture() {
@@ -569,7 +657,8 @@ function makeGlowSprite(inner, outer) {
 }
 
 const texB = makeBuildingTextures();
-const texGround = makeGroundTexture();
+const texG = makeGroundTexture();
+const texGround = texG.map, texGroundBump = texG.bump, texGroundRough = texG.rough;
 const texLeaf = makeLeafTexture();
 const texVine = makeVineTexture();
 const texGrass = makeGrassTexture();
@@ -580,7 +669,9 @@ const texSoft = makeGlowSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0.25)'
 const matPlain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0 });
 const matBld = new THREE.MeshStandardMaterial({
   vertexColors: true, map: texB.map, emissiveMap: texB.emissive,
-  emissive: srgb(0xffc27a), emissiveIntensity: 0, roughness: 0.85, metalness: 0
+  emissive: srgb(0xffc27a), emissiveIntensity: 0,
+  roughness: 1, roughnessMap: texB.rough, bumpMap: texB.bump, bumpScale: 0.5,
+  envMap: envRT.texture, envMapIntensity: 0.6, metalness: 0
 });
 const matLeaf = new THREE.MeshStandardMaterial({
   map: texLeaf, vertexColors: true, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 1, metalness: 0
@@ -601,7 +692,8 @@ const matLamp = new THREE.MeshStandardMaterial({
 // Its opacity is driven by the "dew" factor in updateSky (high at dawn, gone by noon), so the
 // batched puddle discs simply fade in and out with the time of day — like matGlow's emissive.
 const matPuddle = new THREE.MeshStandardMaterial({
-  vertexColors: true, transparent: true, opacity: 0, roughness: 0.12, metalness: 0.35,
+  vertexColors: true, transparent: true, opacity: 0, roughness: 0.06, metalness: 0.35,
+  envMap: envRT.texture, envMapIntensity: 1.2,
   depthWrite: false, side: THREE.DoubleSide
 });
 // Cobwebs (Little details): one shared pale, faintly translucent material for corner webs.
@@ -653,11 +745,13 @@ const texWater2 = makeWaterTexture(1379);
 const matWater = new THREE.MeshStandardMaterial({
   map: texWater, color: srgb(0x9fc8d8), transparent: true, opacity: 0.82,
   roughness: 0.12, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  envMap: envRT.texture, envMapIntensity: 0.9,
   emissive: srgb(0xbfe0f2), emissiveIntensity: 0                              // sky-blue noon sparkle, driven per frame
 });
 const matWater2 = new THREE.MeshStandardMaterial({
   map: texWater2, color: srgb(0xa8cfe0), transparent: true, opacity: 0.35,
   roughness: 0.14, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  envMap: envRT.texture, envMapIntensity: 0.6,
   blending: THREE.NormalBlending
 });
 // Scale a water plane's UVs so the ripple texture tiles at ~`tile` m (default 4, RepeatWrapping).

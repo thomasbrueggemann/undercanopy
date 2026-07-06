@@ -47,6 +47,15 @@ the ridge with a glowing lamp head (registered in `colData.lamps`) that reads ac
 night map. This replaces the earlier partial roof and rim lamp. The deck SHALL remain a valid
 vantage point (the VANTAGE summit check still covers the r 3.0 deck).
 
+The roof SHALL be visible from the deck as well as from outside: because the skyhouse is an
+open pavilion (roof on posts, no walls), the roof SHALL carry interior underside faces for both
+slopes and both gable ends (reversed-winding duplicates of the exterior faces, tinted darker as
+a ceiling, per the two-sided stall-awning idiom — the shared `matPlain` material stays
+FrontSide). Under the slopes the skyhouse SHALL add visible carpentry — rafters and a ridge
+beam — so the ceiling reads as built structure, not bare planes. Interior faces are opt-in per
+call site (`addGableRoof` option); closed structures (city buildings, hamlet stilt huts) SHALL
+keep single-sided roofs, and non-waytree world geometry SHALL be unchanged by this feature.
+
 #### Scenario: Skyhouse rides above the crown on a mast
 
 - **WHEN** a waytree is generated
@@ -66,6 +75,16 @@ vantage point (the VANTAGE summit check still covers the r 3.0 deck).
 
 - **WHEN** the player freeclimbs the bare mast trunk instead of riding the lift
 - **THEN** the mast (height `deckY`, above the 14 m climb threshold) carries the player up to the deck
+
+#### Scenario: Roof is visible from the deck
+
+- **WHEN** the player stands on the skyhouse deck and looks up
+- **THEN** the undersides of both roof slopes and both gable ends render (darker ceiling tint), with rafters and a ridge beam visible beneath the slopes
+
+#### Scenario: Closed structures keep single-sided roofs
+
+- **WHEN** a city building or hamlet stilt hut is generated with a gable roof
+- **THEN** its roof emits only the original exterior faces and its geometry is byte-identical to before this change
 
 ### Requirement: Waytree ground-to-deck ascent
 

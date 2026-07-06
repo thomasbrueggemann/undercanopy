@@ -639,19 +639,40 @@ function bldWalls(B, x0, z0, x1, z1, y0, h, bay, flr, tint, mossy, vFloorBase, u
 }
 // Pitched gable roof: two sloped quads + two triangular gable ends (facade tint), ridge
 // along the long horizontal axis. Slopes/ends to B.plain (no window texture on the roof).
-function addGableRoof(B, x0, z0, x1, z1, y, roofCol, gableCol) {
+// `opts.interior` additionally emits the four faces reversed-wound and darker (a ceiling
+// tint) so the roof also reads from BELOW — matPlain is FrontSide, so single-sided roofs
+// vanish when viewed from under the eaves. Interior faces are for enterable/open structures
+// ONLY (the skyhouse pavilion); closed buildings/huts must omit `opts` to keep the city's
+// vertex count and geometry unchanged. RNG-free: this runs mid-stream in building generation,
+// so it must never draw from rng (any draw here reflows every gabled district).
+function addGableRoof(B, x0, z0, x1, z1, y, roofCol, gableCol, opts) {
   const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
   const rh = clamp(Math.min(w, d) * 0.45, 1.4, 4.5);
+  const interior = !!(opts && opts.interior);
   if (w >= d) {                                    // ridge runs along x, eaves at z0 / z1
     B.plain.quad([x1, y, z0], [x0, y, z0], [x0, y + rh, cz], [x1, y + rh, cz], [0, 0, 1, 1], roofCol);
     B.plain.quad([x0, y, z1], [x1, y, z1], [x1, y + rh, cz], [x0, y + rh, cz], [0, 0, 1, 1], roofCol);
     B.plain.quad([x0, y, z0], [x0, y, z1], [x0, y + rh, cz], [x0, y + rh, cz], [0, 0, 1, 1], gableCol);
     B.plain.quad([x1, y, z1], [x1, y, z0], [x1, y + rh, cz], [x1, y + rh, cz], [0, 0, 1, 1], gableCol);
+    if (interior) {                                // undersides: same 4 faces, winding reversed, ceiling tint
+      const rc = _c.copy(roofCol).multiplyScalar(0.55).clone(), gc = _c.copy(gableCol).multiplyScalar(0.55).clone();
+      B.plain.quad([x1, y + rh, cz], [x0, y + rh, cz], [x0, y, z0], [x1, y, z0], [0, 0, 1, 1], rc);
+      B.plain.quad([x0, y + rh, cz], [x1, y + rh, cz], [x1, y, z1], [x0, y, z1], [0, 0, 1, 1], rc);
+      B.plain.quad([x0, y + rh, cz], [x0, y + rh, cz], [x0, y, z1], [x0, y, z0], [0, 0, 1, 1], gc);
+      B.plain.quad([x1, y + rh, cz], [x1, y + rh, cz], [x1, y, z0], [x1, y, z1], [0, 0, 1, 1], gc);
+    }
   } else {                                         // ridge runs along z, eaves at x0 / x1
     B.plain.quad([x0, y, z0], [x0, y, z1], [cx, y + rh, z1], [cx, y + rh, z0], [0, 0, 1, 1], roofCol);
     B.plain.quad([x1, y, z1], [x1, y, z0], [cx, y + rh, z0], [cx, y + rh, z1], [0, 0, 1, 1], roofCol);
     B.plain.quad([x0, y, z1], [x1, y, z1], [cx, y + rh, z1], [cx, y + rh, z1], [0, 0, 1, 1], gableCol);
     B.plain.quad([x1, y, z0], [x0, y, z0], [cx, y + rh, z0], [cx, y + rh, z0], [0, 0, 1, 1], gableCol);
+    if (interior) {
+      const rc = _c.copy(roofCol).multiplyScalar(0.55).clone(), gc = _c.copy(gableCol).multiplyScalar(0.55).clone();
+      B.plain.quad([cx, y + rh, z0], [cx, y + rh, z1], [x0, y, z1], [x0, y, z0], [0, 0, 1, 1], rc);
+      B.plain.quad([cx, y + rh, z1], [cx, y + rh, z0], [x1, y, z0], [x1, y, z1], [0, 0, 1, 1], rc);
+      B.plain.quad([cx, y + rh, z1], [cx, y + rh, z1], [x1, y, z1], [x0, y, z1], [0, 0, 1, 1], gc);
+      B.plain.quad([cx, y + rh, z0], [cx, y + rh, z0], [x0, y, z0], [x1, y, z0], [0, 0, 1, 1], gc);
+    }
   }
 }
 // Pyramid hip roof: apex over the centre, one triangle per eave edge.
@@ -1494,7 +1515,7 @@ function addWaytree(B, colData, mini, rng, x, z, deckY, extraMeshes) {
     const cx2 = x + Math.cos(a) * roofR * 0.92, cz2 = z + Math.sin(a) * roofR * 0.92;
     B.plain.addGeo(tplCyl, compose(cx2, deckY, cz2, 0.06, roofY - deckY, 0.06), COL.wood, 0.1, rng);
   }
-  addGableRoof(B, x - roofR, z - roofR, x + roofR, z + roofR, roofY, roofCol, gableCol);
+  addGableRoof(B, x - roofR, z - roofR, x + roofR, z + roofR, roofY, roofCol, gableCol, { interior: true });
   colData.pads.push({ x, z, r: 3.2, y: deckY + 2.9 });       // real shade: E ≈ 0.25 inside → body-heat burn ≈ 0 under the roof
   // Skyhouse: a beacon mast from the ridge to a glowing head — reads across the night map (REPLACES the old rim lamp)
   const rh = clamp(roofR * 0.9, 1.4, 4.5);                   // matches addGableRoof's ridge height (min(w,d)*0.45)
@@ -1504,6 +1525,19 @@ function addWaytree(B, colData, mini, rng, x, z, deckY, extraMeshes) {
   colData.lamps.push({ x, z, working: true, hx: x, hy, hz: z });
   const banner = _c.copy(COL.rust).multiplyScalar(1.1).clone();                                          // a small banner off the mast
   B.plain.quad([x, hy - 0.85, z], [x + 0.85, hy - 0.72, z], [x + 0.85, hy - 0.16, z], [x, hy - 0.16, z], [0, 0, 1, 1], banner);
+  // Skyhouse ceiling carpentry: the open pavilion now shows the roof from below (addGableRoof
+  // interior:true above), so dress the underside to read BUILT — a ridge beam under the peak
+  // plus 3 rafter pairs, each running eave→ridge on one slope (parallel to the gable ends).
+  // All dropped ~0.06 m under the roof plane so they sit proud of the ceiling face without
+  // z-fighting it. Runs at the rng-stream tail, so this jitter shifts nothing outside the house.
+  const ridgeCol = _c.copy(COL.wood).multiplyScalar(0.85).clone();
+  const rafterCol = _c.copy(COL.wood).multiplyScalar(0.8).clone();
+  B.plain.addGeo(tplBoxC, compose(x, roofY + rh - 0.06, z, roofR * 1.96, 0.1, 0.1), ridgeCol, 0.1, rng);   // ridge beam along x (matches the w>=d ridge)
+  for (let k = 0; k < 3; k++) {                                                                             // rafter pairs across the ridge axis
+    const xi = x + (k - 1) * roofR * 0.62 + (rng() - 0.5) * 0.3;
+    B.plain.addGeo(tplCyl, segMat(xi, roofY - 0.06, z - roofR, xi, roofY + rh - 0.06, z, 0.05), rafterCol, 0.1, rng);   // slope toward -z eave
+    B.plain.addGeo(tplCyl, segMat(xi, roofY - 0.06, z + roofR, xi, roofY + rh - 0.06, z, 0.05), rafterCol, 0.1, rng);   // slope toward +z eave
+  }
 }
 
 /* ---- power poles & sagging wires ---- */
