@@ -118,6 +118,28 @@ function addSinkhole(B, colData, mini, rng, ox, oz) {
     const a = rng() * 7, dd = rng() * (pitR - 3), s = 0.3 + rng() * 0.3;
     B.glow.addGeo(tplBlob, compose(cx + Math.cos(a) * dd, -depth + 0.3, cz + Math.sin(a) * dd, s, s * 0.7, s, 0, rng() * 7, 0), COL.glowPlant, 0.3, rng);
   }
+  // Funnel throat: the ground plane above now opens over the pit (ground-hole shader in
+  // worldgen-chunks.js), so the mouth needs a continuous earth wall from the rim down to the
+  // floor — without it you'd see clean through the annulus outside the inward wall slabs into
+  // sky. OWN rng stream: the shared chunk rng's call order must not shift, or every sinkhole
+  // chunk's later furniture (and every chunk seeded after it) would re-roll.
+  const srng = mulberry32(hash2(ox, oz, 7777));
+  const nSeg = 24, R0 = pitR + 0.3, R1 = pitR * 0.64, y0 = 0.05, y1 = -depth - 0.15;
+  const soilTop = _c.copy(COL.moss).lerp(srgb(0x4a3a28), 0.5).clone();
+  const soilBot = _c.copy(srgb(0x3a3026)).multiplyScalar(0.6).clone();
+  const jt = [], jb = [];                       // per-spoke radial jitter, shared so the ring closes
+  for (let k = 0; k < nSeg; k++) { jt.push((srng() - 0.5) * 1.0); jb.push((srng() - 0.5) * 0.6); }
+  for (let k = 0; k < nSeg; k++) {
+    const a0 = k / nSeg * Math.PI * 2, a1 = (k + 1) / nSeg * Math.PI * 2;
+    const k1 = (k + 1) % nSeg;
+    const t0x = cx + Math.cos(a0) * (R0 + jt[k]),  t0z = cz + Math.sin(a0) * (R0 + jt[k]);
+    const t1x = cx + Math.cos(a1) * (R0 + jt[k1]), t1z = cz + Math.sin(a1) * (R0 + jt[k1]);
+    const b0x = cx + Math.cos(a0) * (R1 + jb[k]),  b0z = cz + Math.sin(a0) * (R1 + jb[k]);
+    const b1x = cx + Math.cos(a1) * (R1 + jb[k1]), b1z = cz + Math.sin(a1) * (R1 + jb[k1]);
+    // wound so the single-sided face is seen from INSIDE the funnel (looking down/across the
+    // bowl); quad's colB colours the a,b (bottom) edge → dark soil at the floor, mossy at the lip
+    B.plain.quad([b0x, y1, b0z], [b1x, y1, b1z], [t1x, y0, t1z], [t0x, y0, t0z], [0, 0, 1, 2], soilTop, soilBot);
+  }
 }
 
 // TIER 1 — reservoir: a wide low open tank filled with still water. Wading inside drains

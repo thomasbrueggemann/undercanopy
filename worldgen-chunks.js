@@ -19,6 +19,7 @@ function ensureChunks(px, pz, syncAll) {
     }
   }
   buildQueue.sort((a, b) => a.d - b.d);
+  let changed = false;   // ground-hole registry only rebuilds when the loaded pit set could shift
   // immediate ring: never let the player reach an unbuilt chunk
   let budget = syncAll ? 999 : 2;
   while (buildQueue.length && budget > 0) {
@@ -27,6 +28,7 @@ function ensureChunks(px, pz, syncAll) {
     const c = buildChunk(q.ix, q.iz);
     chunks.set(q.key, c);
     scene.add(c.group);
+    changed = true;
     if (q.d > 2) budget--;
   }
   // retire distant chunks
@@ -37,8 +39,12 @@ function ensureChunks(px, pz, syncAll) {
       scene.remove(c.group);
       c.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
       chunks.delete(key);
+      changed = true;
     }
   }
+  // Sinkhole ground-holes: resync the shader's world-space hole circles from live chunks'
+  // round pits whenever a chunk was built or retired (a bowl may have entered/left range).
+  if (changed) syncGroundHoles(px, pz);
 }
 function chunkAt(x, z) { return chunks.get(chunkKey(Math.floor(x / CHUNK), Math.floor(z / CHUNK))); }
 
@@ -344,12 +350,66 @@ scene.add(sea);
 texGround.repeat.set(80, 80);
 texGroundBump.repeat.set(80, 80);
 texGroundRough.repeat.set(80, 80);
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(640, 640), new THREE.MeshStandardMaterial({
+// Sinkhole mouths: the plane opacity-covers anything sunk below y=0 (see the canal fix in
+// worldgen-anomalies.js — canals raise their water above y=0 instead; a sinkhole bowl can't
+// be raised), so the material discards fragments inside up to MAX_GROUND_HOLES world-space
+// circles via onBeforeCompile. Depth is discarded too, so the bowl renders through the hole.
+// syncGroundHoles() rebuilds the uniform set from live chunks' round pits whenever the chunk
+// set changes; _groundShader is captured at compile time so per-frame count updates land.
+const MAX_GROUND_HOLES = 6;
+const _holeVecs = Array.from({ length: MAX_GROUND_HOLES }, () => new THREE.Vector3());
+let _groundShader = null;
+const groundMat = new THREE.MeshStandardMaterial({
   map: texGround, bumpMap: texGroundBump, bumpScale: 0.35,
   roughnessMap: texGroundRough, roughness: 1, metalness: 0,
   envMap: envRT.texture, envMapIntensity: 0.3
-}));
+});
+groundMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uHoles = { value: _holeVecs };
+  // holes registered before this (lazy) first compile must survive — replay the pending count
+  shader.uniforms.uHoleCount = { value: groundMat.userData.pendingHoleCount || 0 };
+  // The plane is translated to the player every frame, so the hole test must run in world
+  // XZ, not the plane's static UVs. r152 anchors verified below (throw-on-no-op guard).
+  const VANCHOR = '#include <begin_vertex>';
+  if (shader.vertexShader.indexOf(VANCHOR) === -1)
+    console.error('CANOPY ground hole-punch: vertex anchor "' + VANCHOR + '" not found in r152 shader — hole punch is a no-op');
+  shader.vertexShader = 'varying vec2 vGroundW;\n' + shader.vertexShader.replace(
+    VANCHOR,
+    VANCHOR + '\n  vGroundW = (modelMatrix * vec4(position, 1.0)).xz;');
+  const FANCHOR = '#include <clipping_planes_fragment>';
+  if (shader.fragmentShader.indexOf(FANCHOR) === -1)
+    console.error('CANOPY ground hole-punch: fragment anchor "' + FANCHOR + '" not found in r152 shader — hole punch is a no-op');
+  shader.fragmentShader = ('varying vec2 vGroundW;\nuniform vec3 uHoles[' + MAX_GROUND_HOLES + '];\nuniform int uHoleCount;\n')
+    + shader.fragmentShader.replace(
+    FANCHOR,
+    'for (int i = 0; i < ' + MAX_GROUND_HOLES + '; i++) {\n'
+    + '  if (i >= uHoleCount) break;\n'
+    + '  vec2 d = vGroundW - uHoles[i].xy;\n'        // uHoles[i].xy = pit world XZ, .z = radius
+    + '  if (dot(d, d) < uHoles[i].z * uHoles[i].z) discard;\n'
+    + '}\n' + FANCHOR);
+  _groundShader = shader;
+};
+groundMat.customProgramCacheKey = () => 'canopy-ground-holes';
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(640, 640), groundMat);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
+
+// Rebuild the hole uniform set from every live chunk's round pits (sinkhole bowls; rect pits
+// are canals, handled by the raised waterline instead). Called from ensureChunks ONLY when
+// the chunk set changed. Radius pit.r - 0.4 is deliberately SMALLER than the funnel's top
+// ring (Part 2) so the plane edge always overlaps the funnel lip — no see-through sliver.
+function syncGroundHoles(px, pz) {
+  const found = [];
+  for (const [, c] of chunks)
+    for (const p of c.colData.pits)
+      if (p.r) found.push(p);            // round pits = sinkhole bowls (rect pits are canals)
+  if (found.length > MAX_GROUND_HOLES)   // keep the nearest MAX when more bowls are loaded than slots
+    found.sort((a, b) => ((a.x - px) ** 2 + (a.z - pz) ** 2) - ((b.x - px) ** 2 + (b.z - pz) ** 2));
+  const n = Math.min(found.length, MAX_GROUND_HOLES);
+  for (let i = 0; i < n; i++) _holeVecs[i].set(found[i].x, found[i].z, found[i].r - 0.4);
+  if (_groundShader) _groundShader.uniforms.uHoleCount.value = n;
+  else groundMat.userData.pendingHoleCount = n;   // shader compiles lazily; count re-applied in onBeforeCompile
+}
 
