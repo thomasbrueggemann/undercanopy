@@ -87,9 +87,10 @@ const dome = new THREE.Mesh(domeGeo, new THREE.MeshBasicMaterial({ vertexColors:
 dome.renderOrder = -10; dome.frustumCulled = false;
 skyGroup.add(dome);
 
-// stars
-{
-  const n = 700, pos = new Float32Array(n * 3), rs = mulberry32(42);
+// stars — two size tiers: real night skies read as a few bright points over a dust of
+// faint ones; a single uniform layer is what makes a game sky look like a decal
+function makeStarField(n, seed, size, color) {
+  const pos = new Float32Array(n * 3), rs = mulberry32(seed);
   for (let i = 0; i < n; i++) {
     const a = rs() * Math.PI * 2, e = Math.asin(rs());
     pos[i * 3] = Math.cos(a) * Math.cos(e) * 720;
@@ -98,18 +99,21 @@ skyGroup.add(dome);
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  var stars = new THREE.Points(g, new THREE.PointsMaterial({
-    color: 0xcfe0ff, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0, fog: false, depthWrite: false
+  const p = new THREE.Points(g, new THREE.PointsMaterial({
+    color, size, sizeAttenuation: false, transparent: true, opacity: 0, fog: false, depthWrite: false
   }));
-  stars.renderOrder = -9; stars.frustumCulled = false;
-  skyGroup.add(stars);
+  p.renderOrder = -9; p.frustumCulled = false;
+  skyGroup.add(p);
+  return p;
 }
+const stars = makeStarField(700, 42, 1.7, 0xcfe0ff);
+const starsDim = makeStarField(1100, 43, 0.9, 0xb8c8dd);
 // sun & moon sprites
 const sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSun, blending: THREE.AdditiveBlending, fog: false, depthWrite: false, transparent: true }));
 sunSprite.scale.set(150, 150, 1); sunSprite.renderOrder = -8;
 skyGroup.add(sunSprite);
-const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texSoft, color: 0xb8c8e0, blending: THREE.AdditiveBlending, fog: false, depthWrite: false, transparent: true }));
-moonSprite.scale.set(55, 55, 1); moonSprite.renderOrder = -8;
+const moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texMoon, color: 0xdce6f2, blending: THREE.AdditiveBlending, fog: false, depthWrite: false, transparent: true }));
+moonSprite.scale.set(46, 46, 1); moonSprite.renderOrder = -8;   // texMoon disc fills ~40% of the sprite → apparent moon ≈ 18 units
 skyGroup.add(moonSprite);
 
 // Sky-probe scene (core.js): clones share the live dome geometry/material and the sprite
@@ -175,6 +179,19 @@ const sunDir = new THREE.Vector3();
 let dayF = 1, nightF = 0, sunElev = 1, dewF = 0;
 let _envAccum = 0, _envDone = false;   // sky-probe refresh throttle (core.js refreshEnvProbe)
 
+// Unit direction per dome vertex, precomputed once: the per-frame recolour below adds a
+// forward-scatter term (sky brightens toward the sun — tight and warm at dusk, broad and
+// faint by day; a cool patch around the moon at night) so the dome reads as a lit volume
+// instead of the same gradient at every azimuth.
+const domeDirs = (() => {
+  const p = domeGeo.attributes.position, a = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const l = Math.hypot(p.getX(i), p.getY(i), p.getZ(i)) || 1;
+    a[i * 3] = p.getX(i) / l; a[i * 3 + 1] = p.getY(i) / l; a[i * 3 + 2] = p.getZ(i) / l;
+  }
+  return a;
+})();
+
 function updateSky(t, dt) {
   const ang = (t - 0.25) * Math.PI * 2;
   sunElev = Math.sin(ang);
@@ -187,12 +204,22 @@ function updateSky(t, dt) {
   _hor.copy(SKY.nightHor).lerp(SKY.dayHor, dayF).lerp(SKY.dawnHor, duskF * (1 - nightF * 0.85));
   _sunC.copy(SKY.sunLow).lerp(SKY.sunHigh, smooth(0.05, 0.5, sunElev));
 
-  // dome vertex colors
+  // dome vertex colors: base vertical gradient + directional scatter toward sun/moon.
+  // The dusk term keeps glowing on the sun side just after set (duskF stays high while
+  // nightF ramps), which is what an actual twilight afterglow does.
   const pos = domeGeo.attributes.position, colA = domeGeo.attributes.color;
   for (let i = 0; i < pos.count; i++) {
     const ny = pos.getY(i) / 760;
     const k = Math.pow(clamp(ny * 1.15 + 0.12, 0, 1), 0.58);
     _c.copy(_hor).lerp(_top, k);
+    const dot = domeDirs[i * 3] * sunDir.x + domeDirs[i * 3 + 1] * sunDir.y + domeDirs[i * 3 + 2] * sunDir.z;
+    if (dot > 0) {
+      const glow = Math.pow(dot, 6) * (0.38 * duskF * (1 - nightF) + 0.10 * dayF) + dot * dot * 0.06 * dayF;
+      if (glow > 0.004) _c.lerp(_sunC, Math.min(0.5, glow));
+    } else if (nightF > 0.02) {
+      const mg = Math.pow(-dot, 8) * nightF * 0.12;
+      if (mg > 0.004) _c.lerp(SKY.moon, mg);
+    }
     colA.setXYZ(i, _c.r, _c.g, _c.b);
   }
   colA.needsUpdate = true;
@@ -228,6 +255,7 @@ function updateSky(t, dt) {
   moonSprite.position.copy(sunDir).multiplyScalar(-690);
   moonSprite.material.opacity = nightF * 0.9;
   stars.material.opacity = nightF * 0.9;
+  starsDim.material.opacity = nightF * 0.55;
   for (const cl of clouds) {
     cl.material.opacity = 0.06 + dayF * 0.16;
     cl.material.color.copy(SKY.sunHigh).lerp(_sunC, duskF * 0.75);   // white by day, ember at dusk
@@ -288,6 +316,17 @@ function makeSeaTexture() {
     x.beginPath(); x.arc(cx2 - rr * 0.22, cy2 - rr * 0.22, rr * 0.7, 0, 7); x.fill();
     x.fillStyle = `hsl(${hpx},${sat - 6}%,${lig + 24 + r() * 12}%)`;
     x.beginPath(); x.arc(cx2 - rr * 0.34, cy2 - rr * 0.34, rr * 0.32, 0, 7); x.fill();
+  }
+  // large-scale hue drift washed over the crowns: real forest roofs vary warm/cool in
+  // hundred-metre patches (species stands, moisture), and without it the 7×7 tiling
+  // reads as one repeating green felt from altitude
+  for (let i = 0; i < 12; i++) {
+    const mr = 60 + r() * 150, mx = r() * S, my = r() * S;
+    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
+    const warm = r() < 0.5;
+    gg.addColorStop(0, warm ? `rgba(150,158,58,${0.07 + r() * 0.07})` : `rgba(26,74,86,${0.07 + r() * 0.07})`);
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
   }
   const t = canvasTex(c); t.repeat.set(7, 7);
   return t;

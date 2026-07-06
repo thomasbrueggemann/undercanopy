@@ -355,14 +355,18 @@ function addViaduct(B, colData, mini, rng, ix, iz, ox, oz) {
 /*  WATERWAYS — canals along rare street lines (line selection like the      */
 /*  viaduct, own salts). An x-border line canal runs in z along x=ox; a      */
 /*  z-border line canal runs in x along z=oz. The street strip is replaced   */
-/*  by a channel: silt bed at y=-1.2, mossy stone embankment walls, a water  */
-/*  plane at y=-0.35 (matWater, wading/heat via colData.waters), and a       */
-/*  rect pit descriptor so ground support inside the channel is the bed.     */
+/*  by an EMBANKED channel: the water surface must sit ABOVE y=0 because the */
+/*  global textured ground plane (worldgen-chunks.js, repositioned to the    */
+/*  player every frame at y=0) opaquely covers anything sunk below street    */
+/*  level — the original y=-0.35 water was never visible, only its wading    */
+/*  collision was. So: water at +0.14 with 5 cm of freeboard under the       */
+/*  coping (top +0.19), like a real city canal running full; the silt bed    */
+/*  stays below via the rect pit descriptor so wading is still chest-deep.   */
 /*  Where the crossing border road meets the canal an arched stone bridge    */
 /*  carries it over; ~40% of chunks also get a mid-block plank footbridge.   */
 /*  Canal ↔ viaduct crossings are allowed (water below, rails above).        */
 /* ======================================================================== */
-const CANAL = { half: 3.5, bedY: -1.2, waterY: -0.35, bank: 5.5, guard: 4.2 };
+const CANAL = { half: 3.5, bedY: -0.9, waterY: 0.14, bank: 5.5, guard: 4.2 };
 function isCanalX(ix) { return hash2(ix, 0, 7001) % 8 === 0; }   // canal along x=ix*CHUNK, running in z
 function isCanalZ(iz) { return hash2(0, iz, 7002) % 8 === 0; }   // canal along z=iz*CHUNK, running in x
 // canal on the street line at grid index `lineIdx`, for a walker moving along `axis`
@@ -396,7 +400,7 @@ function addCanalBridge(B, colData, rng, axis, cross, along) {
 
 // A flat plank footbridge with a slight sag and rope rails across the channel at `along`.
 function addFootbridge(B, colData, rng, axis, cross, along) {
-  const S = 2 * (CANAL.half + 0.8), nPl = 7, pathHalf = 0.9, sag = 0.28, y0 = 0.35;
+  const S = 2 * (CANAL.half + 0.8), nPl = 7, pathHalf = 0.9, sag = 0.28, y0 = 0.55;   // mid-span sag must clear the raised waterline (+0.14)
   const wood = _c.copy(COL.wood).multiplyScalar(0.9 + rng() * 0.3).clone();
   const rope = _c.copy(COL.wire).lerp(COL.rock, 0.5).clone();
   const yAt = (t) => y0 - sag * (1 - (2 * t - 1) * (2 * t - 1));

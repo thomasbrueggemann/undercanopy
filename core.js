@@ -549,26 +549,40 @@ function makeGroundTexture() {
 }
 
 function makeLeafTexture() {
-  const S = 256, r = mulberry32(5150);
+  const S = 512, r = mulberry32(5150);   // 512 px + shaped leaves: crisp fronds at arm's length
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.clearRect(0, 0, S, S);
+  // pointed leaf: two quadratic arcs tip-to-tip (a lens), which reads as an actual leaf
+  // where the old plain ellipse read as confetti at close range
+  function leafPath(rw, rh) {
+    x.beginPath();
+    x.moveTo(-rw, 0);
+    x.quadraticCurveTo(0, -rh * 1.55, rw, 0);
+    x.quadraticCurveTo(0, rh * 1.55, -rw, 0);
+  }
   // dark under-layer leaves first, lit leaves on top — foliage depth comes from
   // shadowed leaves showing between the bright ones, not from a flat confetti layer
   for (let layer = 0; layer < 2; layer++) {
-    const n = layer === 0 ? 130 : 150, shade = layer === 0;
+    const n = layer === 0 ? 390 : 450, shade = layer === 0;
     for (let i = 0; i < n; i++) {
       const hpx = 82 + (r() - 0.5) * 38, s = 38 + r() * 26;
       const l = shade ? 16 + r() * 14 : 40 + r() * 24;
-      const rw = 8 + r() * 13, rh = 4 + r() * 6;
+      const rw = 12 + r() * 19, rh = 5 + r() * 8;
       x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
       x.fillStyle = `hsl(${hpx},${s}%,${l}%)`;
-      x.beginPath(); x.ellipse(0, 0, rw, rh, 0, 0, 7); x.fill();
+      leafPath(rw, rh); x.fill();
       if (!shade) {
-        // lit upper half + darker midrib give each leaf a fold
+        // lit upper half, darker midrib, and two side veins give each leaf a fold
         x.fillStyle = `hsl(${hpx},${s}%,${Math.min(72, l + 12)}%)`;
-        x.beginPath(); x.ellipse(0, -rh * 0.3, rw * 0.85, rh * 0.55, 0, 0, 7); x.fill();
-        x.strokeStyle = `hsl(${hpx},${s + 8}%,${Math.max(10, l - 18)}%)`; x.lineWidth = 1;
-        x.beginPath(); x.moveTo(-rw * 0.8, 0); x.lineTo(rw * 0.8, 0); x.stroke();
+        x.save(); x.scale(0.88, 0.5); x.translate(0, -rh * 0.55); leafPath(rw, rh); x.fill(); x.restore();
+        x.strokeStyle = `hsl(${hpx},${s + 8}%,${Math.max(10, l - 18)}%)`; x.lineWidth = 1.2;
+        x.beginPath(); x.moveTo(-rw * 0.9, 0); x.lineTo(rw * 0.9, 0); x.stroke();
+        x.lineWidth = 0.8;
+        for (const sgn of [-1, 1]) {
+          x.beginPath(); x.moveTo(-rw * 0.25, 0); x.lineTo(rw * 0.15, sgn * rh * 0.75);
+          x.moveTo(rw * 0.25, 0); x.lineTo(rw * 0.55, sgn * rh * 0.55);
+          x.stroke();
+        }
       }
       x.restore();
     }
@@ -656,6 +670,27 @@ function makeGlowSprite(inner, outer) {
   return t;
 }
 
+// The moon as a real disc — limb-lit sphere shading, a few maria, a soft halo — instead
+// of the generic radial blob (which read as a distant streetlight, not a moon).
+function makeMoonTexture() {
+  const S = 128, r = mulberry32(777);
+  const c = makeCanvas(S, S), x = c.getContext('2d');
+  let g = x.createRadialGradient(S / 2, S / 2, S * 0.16, S / 2, S / 2, S / 2);
+  g.addColorStop(0, 'rgba(200,216,236,0.32)'); g.addColorStop(1, 'rgba(200,216,236,0)');
+  x.fillStyle = g; x.fillRect(0, 0, S, S);
+  g = x.createRadialGradient(S * 0.45, S * 0.43, 2, S / 2, S / 2, S * 0.21);
+  g.addColorStop(0, '#f5f8fc'); g.addColorStop(0.75, '#cdd8e6'); g.addColorStop(1, '#aebccf');
+  x.fillStyle = g; x.beginPath(); x.arc(S / 2, S / 2, S * 0.20, 0, 7); x.fill();
+  for (let i = 0; i < 8; i++) {                     // maria: soft grey basins off-centre
+    const a = r() * 7, dd = r() * S * 0.12, mr = 2.5 + r() * 6;
+    x.fillStyle = `rgba(118,132,152,${0.25 + r() * 0.3})`;
+    x.beginPath(); x.arc(S / 2 + Math.cos(a) * dd, S / 2 + Math.sin(a) * dd, mr, 0, 7); x.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  if ('colorSpace' in t) t.colorSpace = THREE.SRGBColorSpace; else t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+
 const texB = makeBuildingTextures();
 const texG = makeGroundTexture();
 const texGround = texG.map, texGroundBump = texG.bump, texGroundRough = texG.rough;
@@ -664,6 +699,7 @@ const texVine = makeVineTexture();
 const texGrass = makeGrassTexture();
 const texSun = makeGlowSprite('rgba(255,255,255,1)', 'rgba(255,220,160,0.55)');
 const texSoft = makeGlowSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0.25)');
+const texMoon = makeMoonTexture();
 
 /* ------------------------------------------------------------- materials -- */
 const matPlain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0 });
@@ -705,31 +741,50 @@ const leafDepth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPac
 // Water: blue with a procedural ripple texture. UVs on each water plane are scaled
 // so one texture tile ≈ 4 m regardless of the plane's size (see scaleWaterUVs).
 function makeWaterTexture(seed) {
-  const S = 256, r = mulberry32(seed || 4242);
+  // Deep open-water look: a near-navy body (real depth reads blue-black, not teal) with
+  // TWO ripple scales — long low swell crests plus fine chop between them — because a
+  // single stroke family is what made the old water read as patterned glass. 512 px at
+  // the same 4 m tile doubles crest detail up close.
+  const S = 512, r = mulberry32(seed || 4242);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   const g = x.createLinearGradient(0, 0, S, S);
-  g.addColorStop(0, '#2b6f8e'); g.addColorStop(0.5, '#1f5a78'); g.addColorStop(1, '#2b6f8e');
+  g.addColorStop(0, '#133f63'); g.addColorStop(0.5, '#0a2b4a'); g.addColorStop(1, '#133f63');
   x.fillStyle = g; x.fillRect(0, 0, S, S);
-  // deeper patches
-  for (let i = 0; i < 22; i++) {
-    const mx = r() * S, my = r() * S, mr = 20 + r() * 60;
+  // deep patches falling to navy-black
+  for (let i = 0; i < 30; i++) {
+    const mx = r() * S, my = r() * S, mr = 34 + r() * 120;
     const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
-    gg.addColorStop(0, `rgba(10,42,64,${0.15 + r() * 0.2})`); gg.addColorStop(1, 'rgba(10,42,64,0)');
+    gg.addColorStop(0, `rgba(3,17,34,${0.18 + r() * 0.22})`); gg.addColorStop(1, 'rgba(3,17,34,0)');
     x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
   }
-  // ripple crests: wandering near-horizontal pale strokes with a dark shadow twin
-  for (let i = 0; i < 60; i++) {
-    const yy = r() * S, ph = r() * 7, amp = 2 + r() * 4, len = 60 + r() * 160, x0 = r() * S;
-    for (const [dy, col, lw] of [[1.6, `rgba(8,34,50,${0.2 + r() * 0.2})`, 2.2], [0, `rgba(170,215,235,${0.16 + r() * 0.22})`, 1.4]]) {
+  // lighter upwell patches so the body isn't one flat tone
+  for (let i = 0; i < 16; i++) {
+    const mx = r() * S, my = r() * S, mr = 26 + r() * 90;
+    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
+    gg.addColorStop(0, `rgba(48,108,152,${0.09 + r() * 0.11})`); gg.addColorStop(1, 'rgba(48,108,152,0)');
+    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
+  }
+  // long swell crests: wandering near-horizontal pale strokes with a dark shadow twin
+  for (let i = 0; i < 54; i++) {
+    const yy = r() * S, ph = r() * 7, amp = 3 + r() * 6, len = 120 + r() * 300, x0 = r() * S;
+    for (const [dy, col, lw] of [[2.2, `rgba(4,20,38,${0.22 + r() * 0.2})`, 2.8], [0, `rgba(140,195,230,${0.14 + r() * 0.2})`, 1.6]]) {
       x.strokeStyle = col; x.lineWidth = lw;
       x.beginPath();
-      for (let t = 0; t <= len; t += 8) x.lineTo(x0 + t, yy + dy + Math.sin(t * 0.05 + ph) * amp);
+      for (let t = 0; t <= len; t += 8) x.lineTo(x0 + t, yy + dy + Math.sin(t * 0.045 + ph) * amp);
       x.stroke();
     }
   }
-  // sun glints
-  for (let i = 0; i < 130; i++) {
-    x.fillStyle = `rgba(210,235,245,${0.1 + r() * 0.25})`;
+  // fine chop between the swells: short, thin, slightly steeper crests
+  for (let i = 0; i < 150; i++) {
+    const yy = r() * S, ph = r() * 7, amp = 1 + r() * 2.2, len = 18 + r() * 56, x0 = r() * S;
+    x.strokeStyle = `rgba(120,175,210,${0.10 + r() * 0.14})`; x.lineWidth = 1;
+    x.beginPath();
+    for (let t = 0; t <= len; t += 5) x.lineTo(x0 + t, yy + Math.sin(t * 0.14 + ph) * amp);
+    x.stroke();
+  }
+  // sparse sun glints riding the crests
+  for (let i = 0; i < 170; i++) {
+    x.fillStyle = `rgba(215,240,250,${0.10 + r() * 0.22})`;
     x.fillRect(r() * S, r() * S, 1 + r() * 3, 1);
   }
   return canvasTex(c);
@@ -742,16 +797,19 @@ function makeWaterTexture(seed) {
 // emissive sparkle; the texture consts below are read from there.
 const texWater = makeWaterTexture(4242);
 const texWater2 = makeWaterTexture(1379);
+// Near-white material color lets the deep-blue map own the hue; opacity up from 0.82 so
+// the canal bed no longer bleeds through and repaints the surface green (the old look
+// read as wet mossy pavement, not water).
 const matWater = new THREE.MeshStandardMaterial({
-  map: texWater, color: srgb(0x9fc8d8), transparent: true, opacity: 0.82,
-  roughness: 0.12, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
-  envMap: envRT.texture, envMapIntensity: 0.9,
-  emissive: srgb(0xbfe0f2), emissiveIntensity: 0                              // sky-blue noon sparkle, driven per frame
+  map: texWater, color: srgb(0xaccce4), transparent: true, opacity: 0.92,
+  roughness: 0.08, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  envMap: envRT.texture, envMapIntensity: 1.0,
+  emissive: srgb(0xa8d4f0), emissiveIntensity: 0                              // sky-blue noon sparkle, driven per frame
 });
 const matWater2 = new THREE.MeshStandardMaterial({
-  map: texWater2, color: srgb(0xa8cfe0), transparent: true, opacity: 0.35,
-  roughness: 0.14, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
-  envMap: envRT.texture, envMapIntensity: 0.6,
+  map: texWater2, color: srgb(0x9fc6e0), transparent: true, opacity: 0.30,
+  roughness: 0.10, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  envMap: envRT.texture, envMapIntensity: 0.7,
   blending: THREE.NormalBlending
 });
 // Scale a water plane's UVs so the ripple texture tiles at ~`tile` m (default 4, RepeatWrapping).
